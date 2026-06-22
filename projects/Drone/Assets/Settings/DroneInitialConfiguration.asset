@@ -1,0 +1,84 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6fdac019f8f5471b85c50a66f7aa01e2, type: 3}
+  m_Name: DroneInitialConfiguration
+  m_EditorClassIdentifier: Assembly-CSharp::DroneInitialConfiguration
+  srtFilePath: Harokopio/harokopio.srt
+  transformConfigFilePath: Harokopio/harokopio.json
+  inputPathRoot: 1
+  outputPathRoot: 0
+  useAbsAltitude: 1
+  playbackSpeed: 1
+  loopPlayback: 0
+  interpolateFrames: 1
+  detectionTimeEpsilon: 0.001
+  flipPositionX: 1
+  flipPositionY: 0
+  flipDirectionX: 1
+  flipDirectionY: 0
+  raycastDistance: 5000
+  raycastMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  requireTargetTag: 0
+  targetColliderTag: 
+  raycastTargetOnly: 0
+  cameraOffsetLocal: {x: 0, y: 0, z: 0}
+  rayOriginUpOffset: 0
+  rayOriginForwardOffset: 0
+  yawOffsetDegrees: 0
+  gimbalBaseRotationEuler: {x: 0, y: 0, z: 0}
+  flipYaw: 1
+  flipPitch: 0
+  flipRoll: 0
+  droneSpriteScale: 0.2
+  autoCreateDroneViewCamera: 0
+  estimateFovFromFocalLength: 1
+  sensorHeightMm: 7.66
+  fixedVerticalFovDegrees: 60
+  capturePixelCoordinates: 0
+  capturePixelUsingJobs: 1
+  pixelStep: 8
+  captureOnlyHits: 1
+  captureEveryNFrames: 2
+  captureFullFrame: 1
+  captureRegionNormalizedSize: {x: 0.5, y: 0.5}
+  maxPixelSamplesPerFrame: 4096
+  invertPixelY: 1
+  pixelCsvPath: Exports/pixel_coordinates.csv
+  pixelCsvFlushEveryNFrames: 30
+  recordRaycastSamples: 0
+  recordMisses: 0
+  outputCsvPath: Exports/raycast_samples.csv
+  recordDetectionsToCsv: 0
+  detectionCsvPath: Exports/detection_raycast_samples.csv
+  detectionJsonPath: campus_video_detections.json
+  processDetectionsOnStart: 1
+  useDetectionRaycastJobs: 1
+  detectionPointMode: 0
+  normalizeDetectionPixels: 1
+  drawDebug: 1
+  drawPixelRayVisualization: 0
+  drawPixelRayEveryN: 16
+  pixelRayHitColor: {r: 0.15, g: 0.95, b: 0.25, a: 1}
+  pixelRayMissColor: {r: 1, g: 0.25, b: 0.25, a: 1}
+  pixelHitNormalColor: {r: 0.2, g: 0.75, b: 1, a: 1}
+  pixelDebugRayDuration: 0.05
+  pixelDebugNormalLength: 0.2
+  drawDetectionHitVisualization: 1
+  detectionHitColor: {r: 0.15, g: 0.95, b: 0.25, a: 1}
+  detectionHitNormalColor: {r: 0.2, g: 0.75, b: 1, a: 1}
+  detectionDebugRayDuration: 0.1
+  mapRootObjectName: Map Mesh
+  targetColliderObjectName: Map Mesh
+  droneViewCameraObjectName: DroneCamera
+  droneSprite: {fileID: 21300000, guid: da96f8030921dd545ae724b2d123775f, type: 3}

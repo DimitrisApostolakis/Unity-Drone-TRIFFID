@@ -1,0 +1,25 @@
+{
+  "type": "FeatureCollection",
+  "name": "building_cluster_demo_points",
+  "features": [
+    {"type":"Feature","properties":{"id":"pt_01","label":"building","expected_cluster":"building_1"},"geometry":{"type":"Point","coordinates":[23.7081398,37.9611893]}},
+    {"type":"Feature","properties":{"id":"pt_02","label":"building","expected_cluster":"building_1"},"geometry":{"type":"Point","coordinates":[23.7081809,37.9612927]}},
+    {"type":"Feature","properties":{"id":"pt_03","label":"building","expected_cluster":"building_1"},"geometry":{"type":"Point","coordinates":[23.7084048,37.9612805]}},
+    {"type":"Feature","properties":{"id":"pt_04","label":"building","expected_cluster":"building_1"},"geometry":{"type":"Point","coordinates":[23.7083224,37.9612095]}},
+    {"type":"Feature","properties":{"id":"pt_05","label":"building","expected_cluster":"building_1"},"geometry":{"type":"Point","coordinates":[23.7080214,37.9614509]}},
+    {"type":"Feature","properties":{"id":"pt_06","label":"building","expected_cluster":"building_1"},"geometry":{"type":"Point","coordinates":[23.7079056,37.961313]}},
+    {"type":"Feature","properties":{"id":"pt_07","label":"building","expected_cluster":"building_1"},"geometry":{"type":"Point","coordinates":[23.7081243,37.961382]}},
+    {"type":"Feature","properties":{"id":"pt_08","label":"building","expected_cluster":"building_1"},"geometry":{"type":"Point","coordinates":[23.7082272,37.9614327]}},
+    {"type":"Feature","properties":{"id":"pt_09","label":"building","expected_cluster":"building_2"},"geometry":{"type":"Point","coordinates":[23.7080098,37.9609588]}},
+    {"type":"Feature","properties":{"id":"pt_10","label":"building","expected_cluster":"building_2"},"geometry":{"type":"Point","coordinates":[23.7078783,37.9608327]}},
+    {"type":"Feature","properties":{"id":"pt_11","label":"building","expected_cluster":"building_2"},"geometry":{"type":"Point","coordinates":[23.7081927,37.9608259]}},
+    {"type":"Feature","properties":{"id":"pt_12","label":"building","expected_cluster":"building_2"},"geometry":{"type":"Point","coordinates":[23.7080755,37.9607966]}},
+    {"type":"Feature","properties":{"id":"pt_13","label":"building","expected_cluster":"building_2"},"geometry":{"type":"Point","coordinates":[23.7079298,37.9607358]}},
+    {"type":"Feature","properties":{"id":"pt_14","label":"building","expected_cluster":"building_2"},"geometry":{"type":"Point","coordinates":[23.707884,37.9609476]}},
+    {"type":"Feature","properties":{"id":"pt_15","label":"building","expected_cluster":"building_2"},"geometry":{"type":"Point","coordinates":[23.7079755,37.9611346]}},
+    {"type":"Feature","properties":{"id":"pt_16","label":"building","expected_cluster":"building_2"},"geometry":{"type":"Point","coordinates":[23.7082127,37.9610422]}},
+    {"type":"Feature","properties":{"id":"pt_17","label":"building","expected_cluster":"building_3"},"geometry":{"type":"Point","coordinates":[23.7084267,37.9607218]}},
+    {"type":"Feature","properties":{"id":"pt_18","label":"building","expected_cluster":"building_3"},"geometry":{"type":"Point","coordinates":[23.708487,37.9608419]}},
+    {"type":"Feature","properties":{"id":"pt_19","label":"building","expected_cluster":"building_3"},"geometry":{"type":"Point","coordinates":[23.70836,37.9607493]}}
+  ]
+}

@@ -1,0 +1,52 @@
+diff --git a/projects/Drone/Assets/Scenes/Drone.unity b/projects/Drone/Assets/Scenes/Drone.unity
+--- a/projects/Drone/Assets/Scenes/Drone.unity
++++ b/projects/Drone/Assets/Scenes/Drone.unity
+@@ -266,6 +266,7 @@ GameObject:
+   m_Component:
+   - component: {fileID: 1981751923}
+   - component: {fileID: 1981751924}
++  - component: {fileID: 1981751925}
+   m_Layer: 0
+   m_Name: DroneSimulation
+   m_TagString: Untagged
+@@ -370,6 +371,40 @@ MonoBehaviour:
+   detectionHitColor: {r: 0.15, g: 0.95, b: 0.25, a: 1}
+   detectionHitNormalColor: {r: 0.2, g: 0.75, b: 1, a: 1}
+   detectionDebugRayDuration: 0.1
++--- !u!114 &1981751925
++MonoBehaviour:
++  m_ObjectHideFlags: 0
++  m_CorrespondingSourceObject: {fileID: 0}
++  m_PrefabInstance: {fileID: 0}
++  m_PrefabAsset: {fileID: 0}
++  m_GameObject: {fileID: 1981751921}
++  m_Enabled: 1
++  m_EditorHideFlags: 0
++  m_Script: {fileID: 11500000, guid: 7ae14a5e0b5b4b5aa01b1aa3f2ed9dc7, type: 3}
++  m_Name: 
++  m_EditorClassIdentifier: Assembly-CSharp::DroneDetectionGeoJsonExporter
++  player: {fileID: 1981751924}
++  detectionJsonPath: campus_video_detections.json
++  inputPathRoot: 1
++  outputPathRoot: 2
++  geoJsonOutputPath: Exports/detection_polygons.geojson
++  exportPoints: 1
++  exportPolygons: 1
++  oneFeaturePerTrackId: 1
++  preferHighestConfidencePerTrack: 1
++  confidenceThreshold: 0.75
++  maxFeatures: 500
++  sampleEveryNFrames: 1
++  sampleEveryNDetections: 1
++  areaLabels:
++  - building
++  pointLabels: []
++  maxPolygonVertices: 40
++  simplificationEpsilonPixels: 4
++  minValidPolygonVertices: 3
++  minPolygonHitRatio: 0.5
++  includeAltitude: 1
++  fallbackToPointWhenPolygonFails: 1
+ --- !u!23 &1464814104600207091
+ MeshRenderer:
+   m_ObjectHideFlags: 0

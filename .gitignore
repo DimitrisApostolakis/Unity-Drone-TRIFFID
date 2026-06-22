@@ -1,0 +1,31 @@
+*.csproj
+*.sln
+.DS_Store
+.idea
+
+/builds/*
+/images/*
+/Shot-*.png
+
+/Assets/GaussianAssets/*
+/Assets/GaussianAssets.meta
+/Assets/Models~/*
+/Library/*
+/Logs/*
+/Temp/*
+/UserSettings/*
+/obj/*
+/Exports
+
+/projects/**/Assets/GaussianAssets/*
+/projects/**/Assets/GaussianAssets.meta
+/projects/**/Assets/Models~/*
+/projects/**/Library/*
+/projects/**/Logs/*
+/projects/**/Temp/*
+/projects/**/Exports/
+/projects/**/UserSettings/*
+/projects/**/obj/*
+*.sln.DotSettings.user
+projects/GaussianExample-URP/Assets/GS Assets/Users-lab-pc-3-Downloads-point_cloud_shs.bytes 
+projects/GaussianExample-URP/Assets/GS Assets/Users-lab-pc-3-Downloads-point_cloud_shs.bytes

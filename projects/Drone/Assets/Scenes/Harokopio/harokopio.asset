@@ -1,0 +1,31 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 33b71fae31e6c7d438e8566dc713e666, type: 3}
+  m_Name: harokopio
+  m_EditorClassIdentifier: GaussianSplatting::GaussianSplatting.Runtime.GaussianSplatAsset
+  m_FormatVersion: 20231020
+  m_SplatCount: 2311781
+  m_BoundsMin: {x: -22.228666, y: -25.080402, z: -17.902897}
+  m_BoundsMax: {x: 40.66967, y: 25.144497, z: 18.82524}
+  m_DataHash:
+    serializedVersion: 2
+    Hash: 4a8397389abaabaccce704c191bf5e8b
+  m_PosFormat: 0
+  m_ScaleFormat: 0
+  m_SHFormat: 0
+  m_ColorFormat: 0
+  m_PosData: {fileID: 4900000, guid: 547fa312f13f0bb4190ca9f9e9ae30b6, type: 3}
+  m_ColorData: {fileID: 4900000, guid: 9e239eb3c03e0074eab60cdd51a13b62, type: 3}
+  m_OtherData: {fileID: 4900000, guid: 1610cf1fcdee59049a1e1fec5192d02d, type: 3}
+  m_SHData: {fileID: 4900000, guid: bbd4cbad371797f4fa1c5e9b34b3718a, type: 3}
+  m_ChunkData: {fileID: 0}
+  m_Cameras: []
