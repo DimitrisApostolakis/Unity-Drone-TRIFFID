@@ -119,67 +119,6 @@ NavMeshSettings:
     debug:
       m_Flags: 0
   m_NavMeshData: {fileID: 0}
---- !u!1 &111244181
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 111244182}
-  - component: {fileID: 111244183}
-  m_Layer: 0
-  m_Name: Benchmarking
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!4 &111244182
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 111244181}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -0.1098, y: -0.58158, z: 3.95071}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &111244183
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 111244181}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: cf0bc4178d6d9cf47996b02020c6be1b, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::BuildingClusterGeoJsonDemo
-  inputGeoJsonPath: demo.geojson
-  inputPathRoot: 2
-  outputGeoJsonPath: Exports/building_cluster_demo_output.geojson
-  outputPathRoot: 0
-  clusteringMode: 1
-  labelFilter: building
-  pointLinkDistanceMeters: 30
-  minPointsPerCluster: 2
-  maxClusterDiameterMeters: 70
-  exportClusterPolygons: 1
-  polygonBufferMeters: 7
-  bufferCircleSegments: 12
-  maxPolygonDiameterMeters: 90
-  exportOriginalPoints: 1
-  exportNoisePoints: 1
-  exportDebugLinesToCentroid: 0
-  includeExpectedClusterComparison: 1
 --- !u!1 &1936490454
 GameObject:
   m_ObjectHideFlags: 0
@@ -262,14 +201,14 @@ Camera:
   serializedVersion: 2
   m_ClearFlags: 1
   m_BackGroundColor: {r: 0.19215687, g: 0.3019608, b: 0.4745098, a: 0}
-  m_projectionMatrixMode: 1
+  m_projectionMatrixMode: 2
   m_GateFitMode: 2
   m_FOVAxisMode: 0
   m_Iso: 200
   m_ShutterSpeed: 0.005
   m_Aperture: 16
   m_FocusDistance: 10
-  m_FocalLength: 50
+  m_FocalLength: 23.999998
   m_BladeCount: 5
   m_Curvature: {x: 2, y: 11}
   m_BarrelClipping: 0.25
@@ -284,7 +223,7 @@ Camera:
     height: 1
   near clip plane: 0.3
   far clip plane: 1000
-  field of view: 18.133995
+  field of view: 53.130108
   orthographic: 0
   orthographic size: 5
   m_Depth: 0
@@ -364,14 +303,12 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::SrtDroneRaycastPlayer
   srtFilePath: Harokopio/harokopio.srt
   transformConfigFilePath: Harokopio/harokopio.json
-  mapRoot: {fileID: 5763572441364102360}
   inputPathRoot: 1
-  outputPathRoot: 0
+  mapRoot: {fileID: 5763572441364102360}
   useAbsAltitude: 1
   playbackSpeed: 1
   loopPlayback: 0
   interpolateFrames: 1
-  detectionTimeEpsilon: 0.001
   flipPositionX: 1
   flipPositionY: 0
   flipDirectionX: 1
@@ -393,45 +330,14 @@ MonoBehaviour:
   flipPitch: 0
   flipRoll: 0
   droneSprite: {fileID: 21300000, guid: da96f8030921dd545ae724b2d123775f, type: 3}
-  droneSpriteScale: 0.2
+  droneSpriteScale: 0.12
   droneViewCamera: {fileID: 1936490457}
   autoCreateDroneViewCamera: 0
   estimateFovFromFocalLength: 1
+  srtFocalLengthIs35mmEquivalent: 1
   sensorHeightMm: 7.66
   fixedVerticalFovDegrees: 60
-  capturePixelCoordinates: 0
-  capturePixelUsingJobs: 1
-  pixelStep: 8
-  captureOnlyHits: 1
-  captureEveryNFrames: 2
-  captureFullFrame: 1
-  captureRegionNormalizedSize: {x: 0.5, y: 0.5}
-  maxPixelSamplesPerFrame: 4096
-  invertPixelY: 1
-  pixelCsvPath: Exports/pixel_coordinates.csv
-  pixelCsvFlushEveryNFrames: 30
-  recordRaycastSamples: 0
-  recordMisses: 0
-  outputCsvPath: Exports/raycast_samples.csv
-  recordDetectionsToCsv: 0
-  detectionCsvPath: Exports/detection_raycast_samples.csv
-  detectionJsonPath: campus_video_detections.json
-  processDetectionsOnStart: 1
-  useDetectionRaycastJobs: 1
-  detectionPointMode: 0
-  normalizeDetectionPixels: 1
   drawDebug: 1
-  drawPixelRayVisualization: 0
-  drawPixelRayEveryN: 16
-  pixelRayHitColor: {r: 0.15, g: 0.95, b: 0.25, a: 1}
-  pixelRayMissColor: {r: 1, g: 0.25, b: 0.25, a: 1}
-  pixelHitNormalColor: {r: 0.2, g: 0.75, b: 1, a: 1}
-  pixelDebugRayDuration: 0.05
-  pixelDebugNormalLength: 0.2
-  drawDetectionHitVisualization: 1
-  detectionHitColor: {r: 0.15, g: 0.95, b: 0.25, a: 1}
-  detectionHitNormalColor: {r: 0.2, g: 0.75, b: 1, a: 1}
-  detectionDebugRayDuration: 0.1
 --- !u!114 &1981751925
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -441,74 +347,17 @@ MonoBehaviour:
   m_GameObject: {fileID: 1981751921}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 7ae14a5e0b5b4b5aa01b1aa3f2ed9dc7, type: 3}
+  m_Script: {fileID: 11500000, guid: dbf93084061d0a84a8c3f4e2f19d08a7, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::DroneDetectionGeoJsonExporter
-  initialConfiguration: {fileID: 11400000, guid: 9a7d6c5b4e3f4210a1b2c3d4e5f60718, type: 2}
+  m_EditorClassIdentifier: Assembly-CSharp::GeoJsonDetectionGeoreferencer
   player: {fileID: 1981751924}
-  detectionJsonPath: C:\Users\apost\Downloads\campus_video_detections (1).json
-  inputPathRoot: 1
+  detectionProjectionMode: 1
+  randomSeed: 12345
+  inputGeoJsonPath: C:\Users\apost\Downloads\campus_video_detections.geojson
+  outputGeoJsonPath: Exports/campus_video_detections_wgs84.geojson
+  inputPathRoot: 3
   outputPathRoot: 0
-  geoJsonOutputPath: Exports/detection_polygons.geojson
-  exportPoints: 0
-  exportPolygons: 1
-  oneFeaturePerTrackId: 1
-  preferHighestConfidencePerTrack: 1
-  confidenceThreshold: 0.6
-  maxFeatures: 1500000
-  sampleEveryNFrames: 1
-  sampleEveryNDetections: 1
-  areaLabels:
-  - building
-  pointLabels: []
-  maxPolygonVertices: 8
-  simplificationEpsilonPixels: 25
-  minValidPolygonVertices: 3
-  minPolygonHitRatio: 0.5
-  includeAltitude: 1
-  fallbackToPointWhenPolygonFails: 0
-  exportRepresentativePointForPolygons: 1
-  representativePointsCountTowardMaxFeatures: 0
-  useConvexHullForPolygons: 1
-  rejectBorderClippedMasks: 1
-  borderMarginPixels: 50
-  minMaskAreaPixels: 50000
-  mergeNearbyPolygons: 0
-  mergePolygonLabels:
-  - building
-  mergeDistanceMeters: 8
-  requireBoundaryDistanceForMerge: 1
-  mergeBoundaryDistanceMeters: 3
-  maxMergedHullAreaGrowthRatio: 2
-  maxMergedClusterDiameterMeters: 25
-  minPolygonsPerMergeCluster: 2
-  keepOriginalPolygonsWhenMerged: 0
-  useConvexHullForMergedPolygons: 1
-  clusterByRepresentativePoints: 1
-  pointClusterLabels:
-  - building
-  pointClusterDistanceMeters: 14
-  minPointsPerCluster: 2
-  maxPointClusterDiameterMeters: 25
-  buildMergedPolygonFromPointClusters: 1
-  maxVertexDistanceFromPointClusterCenterMeters: 20
-  exportUnclusteredRawPolygons: 0
-  exportPointClusterRepresentativePoints: 1
-  exportDebugPointToClusterLines: 1
-  buildPolygonFromPointClusterFallback: 1
-  preferPointClusterHullOverRawPolygonHull: 1
-  pointClusterPolygonBufferMeters: 6
-  maxPointClusterPolygonDiameterMeters: 90
-  pointClusterHullCircleSegments: 8
-  includeRawPolygonVerticesInPointClusterHull: 0
-  maxRawVertexDistanceFromPointClusterCenterMeters: 20
-  mergePointClustersIntoBuildings: 1
-  pointClusterMergeDistanceMeters: 15
-  maxBuildingAggregateDiameterMeters: 60
-  buildingAggregatePolygonBufferMeters: 7
-  exportIntermediatePointClusterPolygons: 0
-  exportBuildingAggregatePolygons: 1
-  exportOnlyAggregatedRepresentativePoints: 1
+  processOnStart: 1
 --- !u!23 &1464814104600207091
 MeshRenderer:
   m_ObjectHideFlags: 0
@@ -761,7 +610,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &8355386886639151933
 Transform:
   m_ObjectHideFlags: 0
@@ -785,4 +634,3 @@ SceneRoots:
   - {fileID: 5763572441364102360}
   - {fileID: 1981751923}
   - {fileID: 1936490458}
-  - {fileID: 111244182}
