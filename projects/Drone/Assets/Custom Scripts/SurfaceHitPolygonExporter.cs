@@ -6,40 +6,46 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 /// <summary>
-/// Creates one provisional WGS84 footprint per physical-object candidate by associating local
-/// detections from different views through shared collider triangles. Raw SurfaceHits are never
+/// Clusters georeferenced raycast hits in a local metric plane and creates one provisional
+/// WGS84 footprint from the outer points of each dense cluster. Raw SurfaceHits are never
 /// modified or discarded by this exporter.
 /// </summary>
 public static class SurfaceHitPolygonExporter
 {
+    private const double EarthRadiusMeters = 6378137.0;
+    private const int Unvisited = -2;
+    private const int Noise = -1;
+
     public sealed class Options
     {
         public string ClassFilter = "building";
-        public int MinimumSharedTriangles = 1;
-        public float MinimumTriangleOverlapRatio = 0.1f;
-        public int MinimumViewsPerSupportedTriangle = 2;
+        public float DbscanEpsilonMeters = 2f;
+        public int DbscanMinimumPoints = 5;
     }
 
     public readonly struct ExportSummary
     {
-        public readonly int DetectionCount;
-        public readonly int AssociationCount;
-        public readonly int CandidateCount;
+        public readonly int InputHitCount;
+        public readonly int GeoreferencedHitCount;
+        public readonly int ClusterCount;
+        public readonly int NoiseHitCount;
         public readonly int ExportedPolygonCount;
-        public readonly int OmittedCandidateCount;
+        public readonly int OmittedClusterCount;
 
         public ExportSummary(
-            int detectionCount,
-            int associationCount,
-            int candidateCount,
+            int inputHitCount,
+            int georeferencedHitCount,
+            int clusterCount,
+            int noiseHitCount,
             int exportedPolygonCount,
-            int omittedCandidateCount)
+            int omittedClusterCount)
         {
-            DetectionCount = detectionCount;
-            AssociationCount = associationCount;
-            CandidateCount = candidateCount;
+            InputHitCount = inputHitCount;
+            GeoreferencedHitCount = georeferencedHitCount;
+            ClusterCount = clusterCount;
+            NoiseHitCount = noiseHitCount;
             ExportedPolygonCount = exportedPolygonCount;
-            OmittedCandidateCount = omittedCandidateCount;
+            OmittedClusterCount = omittedClusterCount;
         }
     }
 
@@ -61,81 +67,51 @@ public static class SurfaceHitPolygonExporter
             return Fail("Polygon export options are missing.", out error);
         if (string.IsNullOrWhiteSpace(options.ClassFilter))
             return Fail("Polygon class filter is empty.", out error);
-        if (options.MinimumSharedTriangles < 1)
-            return Fail("Minimum shared triangles must be at least one.", out error);
-        if (options.MinimumTriangleOverlapRatio <= 0f ||
-            options.MinimumTriangleOverlapRatio > 1f)
-        {
-            return Fail("Triangle overlap ratio must be greater than zero and at most one.", out error);
-        }
-        if (options.MinimumViewsPerSupportedTriangle < 1)
-            return Fail("Minimum views per supported triangle must be at least one.", out error);
+        if (options.DbscanEpsilonMeters <= 0f)
+            return Fail("DBSCAN epsilon must be greater than zero metres.", out error);
+        if (options.DbscanMinimumPoints < 3)
+            return Fail("DBSCAN minimum points must be at least three.", out error);
         if (string.IsNullOrWhiteSpace(outputPath))
             return Fail("Polygon output path is empty.", out error);
 
-        List<DetectionNode> detections = BuildDetections(hits, options.ClassFilter);
-        if (detections.Count == 0)
+        int inputHitCount = CountClassHits(hits, options.ClassFilter);
+        if (inputHitCount == 0)
+            return Fail($"No surface hits have class '{options.ClassFilter}'.", out error);
+
+        List<ClusterPoint> points = BuildClusterPoints(
+            hits, options.ClassFilter, player, out int failedGeoreferenceCount);
+        if (points.Count == 0)
         {
             return Fail(
-                $"No surface hits have class '{options.ClassFilter}'.",
+                $"None of the {inputHitCount} '{options.ClassFilter}' hits could be " +
+                "converted to WGS84.",
                 out error);
         }
 
-        var unionFind = new UnionFind(detections.Count);
-        int associationCount = 0;
-        for (int leftIndex = 0; leftIndex < detections.Count; leftIndex++)
+        ProjectToLocalMetricPlane(points);
+        int[] labels = RunDbscan(
+            points,
+            options.DbscanEpsilonMeters,
+            options.DbscanMinimumPoints,
+            out int clusterCount,
+            out int noiseHitCount);
+
+        var clusters = new List<List<ClusterPoint>>(clusterCount);
+        for (int clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++)
+            clusters.Add(new List<ClusterPoint>());
+        for (int pointIndex = 0; pointIndex < points.Count; pointIndex++)
         {
-            DetectionNode left = detections[leftIndex];
-            for (int rightIndex = leftIndex + 1; rightIndex < detections.Count; rightIndex++)
-            {
-                DetectionNode right = detections[rightIndex];
-                if (left.ViewIndex == right.ViewIndex ||
-                    !string.Equals(
-                        left.ClassName, right.ClassName, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                int minimumTriangleCount = Math.Min(
-                    left.TriangleKeys.Count, right.TriangleKeys.Count);
-                if (minimumTriangleCount == 0)
-                    continue;
-                int sharedTriangleCount = CountIntersection(
-                    left.TriangleKeys, right.TriangleKeys);
-                float overlapRatio = (float)sharedTriangleCount / minimumTriangleCount;
-                if (sharedTriangleCount < options.MinimumSharedTriangles ||
-                    overlapRatio < options.MinimumTriangleOverlapRatio)
-                {
-                    continue;
-                }
-
-                unionFind.Union(leftIndex, rightIndex);
-                associationCount++;
-            }
+            if (labels[pointIndex] >= 0)
+                clusters[labels[pointIndex]].Add(points[pointIndex]);
         }
 
-        var groupsByRoot = new Dictionary<int, List<DetectionNode>>();
-        for (int i = 0; i < detections.Count; i++)
-        {
-            int root = unionFind.Find(i);
-            if (!groupsByRoot.TryGetValue(root, out List<DetectionNode> group))
-            {
-                group = new List<DetectionNode>();
-                groupsByRoot.Add(root, group);
-            }
-            group.Add(detections[i]);
-        }
-
-        var groups = new List<List<DetectionNode>>(groupsByRoot.Values);
-        groups.Sort(CompareGroups);
         var features = new JArray();
         int omittedCount = 0;
-        for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+        for (int clusterIndex = 0; clusterIndex < clusters.Count; clusterIndex++)
         {
             if (!TryBuildFeature(
-                    groups[groupIndex],
-                    groupIndex,
-                    player,
+                    clusters[clusterIndex],
+                    clusterIndex,
                     options,
                     out JObject feature))
             {
@@ -149,17 +125,17 @@ public static class SurfaceHitPolygonExporter
         {
             ["provisional"] = true,
             ["class_filter"] = options.ClassFilter,
-            ["association_method"] = "shared_collider_triangles_transitive_graph",
+            ["clustering_method"] = "dbscan_local_enu",
             ["polygon_method"] = "horizontal_convex_hull",
-            ["minimum_shared_triangles"] = options.MinimumSharedTriangles,
-            ["minimum_triangle_overlap_ratio"] = options.MinimumTriangleOverlapRatio,
-            ["minimum_views_per_supported_triangle"] =
-                options.MinimumViewsPerSupportedTriangle,
-            ["detection_count"] = detections.Count,
-            ["association_count"] = associationCount,
-            ["candidate_count"] = groups.Count,
+            ["dbscan_epsilon_m"] = options.DbscanEpsilonMeters,
+            ["dbscan_minimum_points"] = options.DbscanMinimumPoints,
+            ["input_hit_count"] = inputHitCount,
+            ["georeferenced_hit_count"] = points.Count,
+            ["failed_georeference_hit_count"] = failedGeoreferenceCount,
+            ["cluster_count"] = clusterCount,
+            ["noise_hit_count"] = noiseHitCount,
             ["exported_polygon_count"] = features.Count,
-            ["omitted_candidate_count"] = omittedCount
+            ["omitted_cluster_count"] = omittedCount
         };
         var rootObject = new JObject
         {
@@ -178,9 +154,7 @@ public static class SurfaceHitPolygonExporter
             if (string.IsNullOrWhiteSpace(directory))
                 return Fail("Polygon output directory could not be resolved.", out error);
             Directory.CreateDirectory(directory);
-            File.WriteAllText(
-                outputPath,
-                rootObject.ToString(Formatting.Indented));
+            File.WriteAllText(outputPath, rootObject.ToString(Formatting.Indented));
         }
         catch (Exception exception)
         {
@@ -188,108 +162,230 @@ public static class SurfaceHitPolygonExporter
         }
 
         summary = new ExportSummary(
-            detections.Count,
-            associationCount,
-            groups.Count,
+            inputHitCount,
+            points.Count,
+            clusterCount,
+            noiseHitCount,
             features.Count,
             omittedCount);
         return true;
     }
 
-    private static List<DetectionNode> BuildDetections(
-        IReadOnlyList<SurfaceHit> hits, string classFilter)
+    private static int CountClassHits(IReadOnlyList<SurfaceHit> hits, string classFilter)
     {
-        var byId = new Dictionary<string, DetectionNode>(StringComparer.Ordinal);
+        int count = 0;
+        for (int i = 0; i < hits.Count; i++)
+        {
+            if (string.Equals(hits[i].ClassName, classFilter, StringComparison.OrdinalIgnoreCase))
+                count++;
+        }
+        return count;
+    }
+
+    private static List<ClusterPoint> BuildClusterPoints(
+        IReadOnlyList<SurfaceHit> hits,
+        string classFilter,
+        SrtDroneRaycastPlayer player,
+        out int failedGeoreferenceCount)
+    {
+        failedGeoreferenceCount = 0;
+        var points = new List<ClusterPoint>();
         for (int i = 0; i < hits.Count; i++)
         {
             SurfaceHit hit = hits[i];
             if (!string.Equals(hit.ClassName, classFilter, StringComparison.OrdinalIgnoreCase))
                 continue;
-            string detectionId = hit.LocalDetectionId ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(detectionId))
+            if (!player.TryConvertWorldToWgs84(
+                    hit.WorldPoint,
+                    out double longitude,
+                    out double latitude,
+                    out double altitude))
+            {
+                failedGeoreferenceCount++;
                 continue;
-            if (!byId.TryGetValue(detectionId, out DetectionNode detection))
-            {
-                detection = new DetectionNode(
-                    detectionId, hit.ClassName, hit.ViewIndex, hit.FrameIndex);
-                byId.Add(detectionId, detection);
             }
-            detection.Hits.Add(hit);
-            if (hit.TriangleIndex >= 0)
+            points.Add(new ClusterPoint(hit, longitude, latitude));
+        }
+        return points;
+    }
+
+    private static void ProjectToLocalMetricPlane(List<ClusterPoint> points)
+    {
+        double longitudeSum = 0.0;
+        double latitudeSum = 0.0;
+        for (int i = 0; i < points.Count; i++)
+        {
+            longitudeSum += points[i].Geo.Longitude;
+            latitudeSum += points[i].Geo.Latitude;
+        }
+
+        double referenceLongitude = longitudeSum / points.Count;
+        double referenceLatitude = latitudeSum / points.Count;
+        double longitudeScale = Math.Cos(DegreesToRadians(referenceLatitude));
+        for (int i = 0; i < points.Count; i++)
+        {
+            ClusterPoint point = points[i];
+            point.EastMeters = EarthRadiusMeters *
+                DegreesToRadians(point.Geo.Longitude - referenceLongitude) * longitudeScale;
+            point.NorthMeters = EarthRadiusMeters *
+                DegreesToRadians(point.Geo.Latitude - referenceLatitude);
+        }
+    }
+
+    private static int[] RunDbscan(
+        List<ClusterPoint> points,
+        double epsilonMeters,
+        int minimumPoints,
+        out int clusterCount,
+        out int noiseHitCount)
+    {
+        var labels = new int[points.Count];
+        for (int i = 0; i < labels.Length; i++)
+            labels[i] = Unvisited;
+
+        Dictionary<GridKey, List<int>> spatialGrid = BuildSpatialGrid(points, epsilonMeters);
+        var queuedGeneration = new int[points.Count];
+        int generation = 0;
+        clusterCount = 0;
+
+        for (int pointIndex = 0; pointIndex < points.Count; pointIndex++)
+        {
+            if (labels[pointIndex] != Unvisited)
+                continue;
+
+            List<int> neighbours = FindNeighbours(
+                pointIndex, points, spatialGrid, epsilonMeters);
+            if (neighbours.Count < minimumPoints)
             {
-                detection.TriangleKeys.Add(new TriangleKey(
-                    hit.ColliderInstanceId, hit.TriangleIndex));
+                labels[pointIndex] = Noise;
+                continue;
+            }
+
+            int clusterLabel = clusterCount++;
+            labels[pointIndex] = clusterLabel;
+            generation++;
+            var expansionQueue = new Queue<int>();
+            EnqueueUnique(neighbours, expansionQueue, queuedGeneration, generation);
+
+            while (expansionQueue.Count > 0)
+            {
+                int neighbourIndex = expansionQueue.Dequeue();
+                if (labels[neighbourIndex] == Noise)
+                    labels[neighbourIndex] = clusterLabel;
+                if (labels[neighbourIndex] != Unvisited)
+                    continue;
+
+                labels[neighbourIndex] = clusterLabel;
+                List<int> neighbourNeighbours = FindNeighbours(
+                    neighbourIndex, points, spatialGrid, epsilonMeters);
+                if (neighbourNeighbours.Count >= minimumPoints)
+                {
+                    EnqueueUnique(
+                        neighbourNeighbours,
+                        expansionQueue,
+                        queuedGeneration,
+                        generation);
+                }
             }
         }
 
-        var detections = new List<DetectionNode>(byId.Values);
-        detections.Sort(DetectionNode.Compare);
-        return detections;
+        noiseHitCount = 0;
+        for (int i = 0; i < labels.Length; i++)
+        {
+            if (labels[i] == Noise)
+                noiseHitCount++;
+        }
+        return labels;
+    }
+
+    private static Dictionary<GridKey, List<int>> BuildSpatialGrid(
+        List<ClusterPoint> points, double cellSize)
+    {
+        var grid = new Dictionary<GridKey, List<int>>();
+        for (int i = 0; i < points.Count; i++)
+        {
+            GridKey key = GridKey.FromPoint(points[i], cellSize);
+            if (!grid.TryGetValue(key, out List<int> indices))
+            {
+                indices = new List<int>();
+                grid.Add(key, indices);
+            }
+            indices.Add(i);
+        }
+        return grid;
+    }
+
+    private static List<int> FindNeighbours(
+        int pointIndex,
+        List<ClusterPoint> points,
+        Dictionary<GridKey, List<int>> grid,
+        double epsilonMeters)
+    {
+        ClusterPoint point = points[pointIndex];
+        GridKey centre = GridKey.FromPoint(point, epsilonMeters);
+        double squaredEpsilon = epsilonMeters * epsilonMeters;
+        var neighbours = new List<int>();
+        for (int xOffset = -1; xOffset <= 1; xOffset++)
+        {
+            for (int yOffset = -1; yOffset <= 1; yOffset++)
+            {
+                var key = new GridKey(centre.X + xOffset, centre.Y + yOffset);
+                if (!grid.TryGetValue(key, out List<int> candidates))
+                    continue;
+                for (int candidateIndex = 0; candidateIndex < candidates.Count; candidateIndex++)
+                {
+                    int candidate = candidates[candidateIndex];
+                    double eastDelta = points[candidate].EastMeters - point.EastMeters;
+                    double northDelta = points[candidate].NorthMeters - point.NorthMeters;
+                    if (eastDelta * eastDelta + northDelta * northDelta <= squaredEpsilon)
+                        neighbours.Add(candidate);
+                }
+            }
+        }
+        return neighbours;
+    }
+
+    private static void EnqueueUnique(
+        List<int> indices,
+        Queue<int> queue,
+        int[] queuedGeneration,
+        int generation)
+    {
+        for (int i = 0; i < indices.Count; i++)
+        {
+            int index = indices[i];
+            if (queuedGeneration[index] == generation)
+                continue;
+            queuedGeneration[index] = generation;
+            queue.Enqueue(index);
+        }
     }
 
     private static bool TryBuildFeature(
-        List<DetectionNode> group,
-        int groupIndex,
-        SrtDroneRaycastPlayer player,
+        List<ClusterPoint> cluster,
+        int clusterIndex,
         Options options,
         out JObject feature)
     {
         feature = null;
-        var allHits = new List<SurfaceHit>();
-        var detectionIds = new List<string>();
+        var geoPoints = new List<GeoPoint>(cluster.Count);
+        var uniqueGeoPoints = new HashSet<GeoPoint>();
+        var detectionIds = new HashSet<string>(StringComparer.Ordinal);
         var viewIndices = new HashSet<int>();
-        var viewsByTriangle = new Dictionary<TriangleKey, HashSet<int>>();
-        for (int i = 0; i < group.Count; i++)
+        for (int i = 0; i < cluster.Count; i++)
         {
-            DetectionNode detection = group[i];
-            detectionIds.Add(detection.Id);
-            viewIndices.Add(detection.ViewIndex);
-            allHits.AddRange(detection.Hits);
-            for (int hitIndex = 0; hitIndex < detection.Hits.Count; hitIndex++)
-            {
-                SurfaceHit hit = detection.Hits[hitIndex];
-                if (hit.TriangleIndex < 0)
-                    continue;
-                var key = new TriangleKey(hit.ColliderInstanceId, hit.TriangleIndex);
-                if (!viewsByTriangle.TryGetValue(key, out HashSet<int> views))
-                {
-                    views = new HashSet<int>();
-                    viewsByTriangle.Add(key, views);
-                }
-                views.Add(hit.ViewIndex);
-            }
+            ClusterPoint point = cluster[i];
+            if (uniqueGeoPoints.Add(point.Geo))
+                geoPoints.Add(point.Geo);
+            if (!string.IsNullOrWhiteSpace(point.Hit.LocalDetectionId))
+                detectionIds.Add(point.Hit.LocalDetectionId);
+            viewIndices.Add(point.Hit.ViewIndex);
         }
 
-        var supportedHits = new List<SurfaceHit>();
-        for (int i = 0; i < allHits.Count; i++)
-        {
-            SurfaceHit hit = allHits[i];
-            if (hit.TriangleIndex < 0)
-                continue;
-            var key = new TriangleKey(hit.ColliderInstanceId, hit.TriangleIndex);
-            if (viewsByTriangle.TryGetValue(key, out HashSet<int> views) &&
-                views.Count >= options.MinimumViewsPerSupportedTriangle)
-            {
-                supportedHits.Add(hit);
-            }
-        }
-
-        bool usedMultiViewSupport = supportedHits.Count >= 3;
-        List<SurfaceHit> polygonHits = usedMultiViewSupport ? supportedHits : allHits;
-        List<GeoPoint> geoPoints = ConvertToGeoPoints(polygonHits, player);
         List<GeoPoint> hull = BuildConvexHull(geoPoints);
-        if (hull.Count < 3 && usedMultiViewSupport)
-        {
-            usedMultiViewSupport = false;
-            polygonHits = allHits;
-            geoPoints = ConvertToGeoPoints(polygonHits, player);
-            hull = BuildConvexHull(geoPoints);
-        }
         if (hull.Count < 3)
             return false;
 
-        string className = group[0].ClassName;
-        string featureId = $"{SanitizeId(className)}_{groupIndex:D3}";
         var ring = new JArray();
         for (int i = 0; i < hull.Count; i++)
             ring.Add(new JArray(hull[i].Longitude, hull[i].Latitude));
@@ -297,25 +393,25 @@ public static class SurfaceHitPolygonExporter
         var polygonCoordinates = new JArray();
         polygonCoordinates.Add(ring);
 
-        detectionIds.Sort(StringComparer.Ordinal);
+        var sortedDetectionIds = new List<string>(detectionIds);
+        sortedDetectionIds.Sort(StringComparer.Ordinal);
         var sortedViews = new List<int>(viewIndices);
         sortedViews.Sort();
         feature = new JObject
         {
             ["type"] = "Feature",
-            ["id"] = featureId,
+            ["id"] = $"{SanitizeId(options.ClassFilter)}_{clusterIndex:D3}",
             ["properties"] = new JObject
             {
-                ["class"] = className,
+                ["class"] = options.ClassFilter,
                 ["source"] = "mask_raycast_multiview",
                 ["provisional"] = true,
-                ["association_method"] = "shared_collider_triangles_transitive_graph",
+                ["clustering_method"] = "dbscan_local_enu",
                 ["polygon_method"] = "horizontal_convex_hull",
-                ["detection_ids"] = new JArray(detectionIds),
+                ["detection_ids"] = new JArray(sortedDetectionIds),
                 ["view_indices"] = new JArray(sortedViews),
-                ["raw_hit_count"] = allHits.Count,
-                ["polygon_hit_count"] = polygonHits.Count,
-                ["used_multiview_triangle_support"] = usedMultiViewSupport
+                ["cluster_hit_count"] = cluster.Count,
+                ["hull_vertex_count"] = hull.Count
             },
             ["geometry"] = new JObject
             {
@@ -384,28 +480,6 @@ public static class SurfaceHitPolygonExporter
                (token.Type == JTokenType.Integer || token.Type == JTokenType.Float);
     }
 
-    private static List<GeoPoint> ConvertToGeoPoints(
-        List<SurfaceHit> hits, SrtDroneRaycastPlayer player)
-    {
-        var points = new List<GeoPoint>(hits.Count);
-        var unique = new HashSet<GeoPoint>();
-        for (int i = 0; i < hits.Count; i++)
-        {
-            if (!player.TryConvertWorldToWgs84(
-                    hits[i].WorldPoint,
-                    out double longitude,
-                    out double latitude,
-                    out double altitude))
-            {
-                continue;
-            }
-            var point = new GeoPoint(longitude, latitude);
-            if (unique.Add(point))
-                points.Add(point);
-        }
-        return points;
-    }
-
     private static List<GeoPoint> BuildConvexHull(List<GeoPoint> points)
     {
         if (points.Count < 3)
@@ -445,36 +519,9 @@ public static class SurfaceHitPolygonExporter
                (left.Latitude - origin.Latitude) * (right.Longitude - origin.Longitude);
     }
 
-    private static int CountIntersection(
-        HashSet<TriangleKey> left, HashSet<TriangleKey> right)
+    private static double DegreesToRadians(double degrees)
     {
-        HashSet<TriangleKey> smaller = left.Count <= right.Count ? left : right;
-        HashSet<TriangleKey> larger = left.Count <= right.Count ? right : left;
-        int count = 0;
-        foreach (TriangleKey key in smaller)
-        {
-            if (larger.Contains(key))
-                count++;
-        }
-        return count;
-    }
-
-    private static int CompareGroups(List<DetectionNode> left, List<DetectionNode> right)
-    {
-        string leftId = FindMinimumId(left);
-        string rightId = FindMinimumId(right);
-        return string.Compare(leftId, rightId, StringComparison.Ordinal);
-    }
-
-    private static string FindMinimumId(List<DetectionNode> group)
-    {
-        string minimum = group[0].Id;
-        for (int i = 1; i < group.Count; i++)
-        {
-            if (string.Compare(group[i].Id, minimum, StringComparison.Ordinal) < 0)
-                minimum = group[i].Id;
-        }
-        return minimum;
+        return degrees * Math.PI / 180.0;
     }
 
     private static string SanitizeId(string value)
@@ -496,59 +543,53 @@ public static class SurfaceHitPolygonExporter
         return false;
     }
 
-    private sealed class DetectionNode
+    private sealed class ClusterPoint
     {
-        public readonly string Id;
-        public readonly string ClassName;
-        public readonly int ViewIndex;
-        public readonly int FrameIndex;
-        public readonly List<SurfaceHit> Hits = new List<SurfaceHit>();
-        public readonly HashSet<TriangleKey> TriangleKeys = new HashSet<TriangleKey>();
+        public readonly SurfaceHit Hit;
+        public readonly GeoPoint Geo;
+        public double EastMeters;
+        public double NorthMeters;
 
-        public DetectionNode(string id, string className, int viewIndex, int frameIndex)
+        public ClusterPoint(SurfaceHit hit, double longitude, double latitude)
         {
-            Id = id;
-            ClassName = className;
-            ViewIndex = viewIndex;
-            FrameIndex = frameIndex;
-        }
-
-        public static int Compare(DetectionNode left, DetectionNode right)
-        {
-            int viewComparison = left.ViewIndex.CompareTo(right.ViewIndex);
-            return viewComparison != 0
-                ? viewComparison
-                : string.Compare(left.Id, right.Id, StringComparison.Ordinal);
+            Hit = hit;
+            Geo = new GeoPoint(longitude, latitude);
         }
     }
 
-    private readonly struct TriangleKey : IEquatable<TriangleKey>
+    private readonly struct GridKey : IEquatable<GridKey>
     {
-        private readonly int colliderInstanceId;
-        private readonly int triangleIndex;
+        public readonly int X;
+        public readonly int Y;
 
-        public TriangleKey(int colliderInstanceId, int triangleIndex)
+        public GridKey(int x, int y)
         {
-            this.colliderInstanceId = colliderInstanceId;
-            this.triangleIndex = triangleIndex;
+            X = x;
+            Y = y;
         }
 
-        public bool Equals(TriangleKey other)
+        public static GridKey FromPoint(ClusterPoint point, double cellSize)
         {
-            return colliderInstanceId == other.colliderInstanceId &&
-                   triangleIndex == other.triangleIndex;
+            return new GridKey(
+                (int)Math.Floor(point.EastMeters / cellSize),
+                (int)Math.Floor(point.NorthMeters / cellSize));
+        }
+
+        public bool Equals(GridKey other)
+        {
+            return X == other.X && Y == other.Y;
         }
 
         public override bool Equals(object obj)
         {
-            return obj is TriangleKey other && Equals(other);
+            return obj is GridKey other && Equals(other);
         }
 
         public override int GetHashCode()
         {
             unchecked
             {
-                return (colliderInstanceId * 397) ^ triangleIndex;
+                return (X * 397) ^ Y;
             }
         }
     }
@@ -588,44 +629,6 @@ public static class SurfaceHitPolygonExporter
             return longitudeComparison != 0
                 ? longitudeComparison
                 : left.Latitude.CompareTo(right.Latitude);
-        }
-    }
-
-    private sealed class UnionFind
-    {
-        private readonly int[] parent;
-        private readonly byte[] rank;
-
-        public UnionFind(int count)
-        {
-            parent = new int[count];
-            rank = new byte[count];
-            for (int i = 0; i < count; i++)
-                parent[i] = i;
-        }
-
-        public int Find(int value)
-        {
-            if (parent[value] != value)
-                parent[value] = Find(parent[value]);
-            return parent[value];
-        }
-
-        public void Union(int left, int right)
-        {
-            int leftRoot = Find(left);
-            int rightRoot = Find(right);
-            if (leftRoot == rightRoot)
-                return;
-            if (rank[leftRoot] < rank[rightRoot])
-                parent[leftRoot] = rightRoot;
-            else if (rank[leftRoot] > rank[rightRoot])
-                parent[rightRoot] = leftRoot;
-            else
-            {
-                parent[rightRoot] = leftRoot;
-                rank[leftRoot]++;
-            }
         }
     }
 }

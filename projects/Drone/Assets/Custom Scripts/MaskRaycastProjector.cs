@@ -13,7 +13,7 @@ using UnityEngine;
 [Serializable]
 public sealed class MaskProjectionRequest
 {
-    [Tooltip("PNG mask path. Relative paths use the projector's Mask Path Root.")]
+    [Tooltip("PNG/JPG mask path. Relative paths use the projector's Mask Path Root.")]
     public string maskPath = string.Empty;
 
     [Min(0)] public int viewIndex;
@@ -105,7 +105,7 @@ public sealed class MaskProjectionStats
 public sealed class MaskRaycastProjector : MonoBehaviour
 {
     private static readonly Regex BatchMaskFileNameRegex = new Regex(
-        @"^(?<class>.+)_view(?<view>\d+)_component(?<component>\d+)\.png$",
+        @"^(?<class>.+)_view(?<view>\d+)_component(?<component>\d+)\.(?:png|jpe?g)$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [Header("Projection Engine")]
@@ -117,9 +117,11 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [SerializeField] private List<MaskProjectionRequest> masks = new List<MaskProjectionRequest>();
 
     [Header("Batch Discovery And Report")]
-    [Tooltip("Folder containing CLASS_viewXX_componentYY.png masks. Leave empty to use the " +
-             "folder of the first configured mask.")]
+    [Tooltip("Primary folder containing CLASS_viewXX_componentYY PNG/JPG masks. Leave empty " +
+             "to use the folder of the first configured mask.")]
     [SerializeField] private string batchMaskDirectory = string.Empty;
+    [Tooltip("Optional extra mask folders, for example a separate green_trees output folder.")]
+    [SerializeField] private List<string> additionalBatchMaskDirectories = new List<string>();
     [SerializeField] private List<MaskViewFrameMapping> viewFrameMappings =
         new List<MaskViewFrameMapping>
         {
@@ -135,9 +137,10 @@ public sealed class MaskRaycastProjector : MonoBehaviour
 
     [Header("Provisional Polygon Export")]
     [SerializeField] private string polygonClassFilter = "building";
-    [Min(1)] [SerializeField] private int minimumSharedTriangles = 1;
-    [Range(0.01f, 1f)] [SerializeField] private float minimumTriangleOverlapRatio = 0.1f;
-    [Min(1)] [SerializeField] private int minimumViewsPerSupportedTriangle = 2;
+    [Tooltip("Maximum horizontal distance in metres between neighbouring DBSCAN hits.")]
+    [Min(0.01f)] [SerializeField] private float dbscanEpsilonMeters = 2f;
+    [Tooltip("Minimum number of neighbouring hits needed to form a dense DBSCAN region.")]
+    [Min(3)] [SerializeField] private int dbscanMinimumPoints = 5;
 
     [Header("Source Video Dimensions")]
     [Tooltip("Use zero to infer the width from each mask. Set this when masks were resized.")]
@@ -184,18 +187,27 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     public bool TryDiscoverMasksFromBatchDirectory(out string error)
     {
         error = string.Empty;
-        string resolvedDirectory;
+        List<string> resolvedDirectories;
         try
         {
-            resolvedDirectory = ResolveBatchMaskDirectory();
+            resolvedDirectories = ResolveBatchMaskDirectories();
         }
         catch (Exception exception)
         {
             return Fail($"Invalid batch mask directory: {exception.Message}", out error);
         }
 
-        if (string.IsNullOrWhiteSpace(resolvedDirectory) || !Directory.Exists(resolvedDirectory))
-            return Fail($"Batch mask directory does not exist: '{resolvedDirectory}'.", out error);
+        if (resolvedDirectories.Count == 0)
+            return Fail("No batch mask directory is configured.", out error);
+        for (int i = 0; i < resolvedDirectories.Count; i++)
+        {
+            if (!Directory.Exists(resolvedDirectories[i]))
+            {
+                return Fail(
+                    $"Batch mask directory does not exist: '{resolvedDirectories[i]}'.",
+                    out error);
+            }
+        }
 
         EnsureDefaultViewFrameMappings();
         var framesByView = new Dictionary<int, int>();
@@ -211,35 +223,43 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             framesByView.Add(mapping.viewIndex, mapping.frameIndex);
         }
 
-        string[] files = Directory.GetFiles(resolvedDirectory, "*", SearchOption.TopDirectoryOnly);
         var discovered = new List<DiscoveredMask>();
-        int ignoredPngCount = 0;
+        var discoveredPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int ignoredImageCount = 0;
         int unmappedViewCount = 0;
-        for (int i = 0; i < files.Length; i++)
+        for (int directoryIndex = 0; directoryIndex < resolvedDirectories.Count; directoryIndex++)
         {
-            string fileName = Path.GetFileName(files[i]);
-            if (!string.Equals(Path.GetExtension(fileName), ".png", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            Match match = BatchMaskFileNameRegex.Match(fileName);
-            if (!match.Success ||
-                !int.TryParse(match.Groups["view"].Value, NumberStyles.None,
-                    CultureInfo.InvariantCulture, out int viewIndex) ||
-                !int.TryParse(match.Groups["component"].Value, NumberStyles.None,
-                    CultureInfo.InvariantCulture, out int componentIndex))
+            string[] files = Directory.GetFiles(
+                resolvedDirectories[directoryIndex], "*", SearchOption.TopDirectoryOnly);
+            for (int fileIndex = 0; fileIndex < files.Length; fileIndex++)
             {
-                ignoredPngCount++;
-                continue;
-            }
-            if (!framesByView.TryGetValue(viewIndex, out int frameIndex))
-            {
-                unmappedViewCount++;
-                continue;
-            }
+                string fileName = Path.GetFileName(files[fileIndex]);
+                if (!IsSupportedMaskImage(fileName))
+                    continue;
 
-            string className = match.Groups["class"].Value;
-            discovered.Add(new DiscoveredMask(
-                files[i], className, viewIndex, frameIndex, componentIndex));
+                Match match = BatchMaskFileNameRegex.Match(fileName);
+                if (!match.Success ||
+                    !int.TryParse(match.Groups["view"].Value, NumberStyles.None,
+                        CultureInfo.InvariantCulture, out int viewIndex) ||
+                    !int.TryParse(match.Groups["component"].Value, NumberStyles.None,
+                        CultureInfo.InvariantCulture, out int componentIndex))
+                {
+                    ignoredImageCount++;
+                    continue;
+                }
+                if (!framesByView.TryGetValue(viewIndex, out int frameIndex))
+                {
+                    unmappedViewCount++;
+                    continue;
+                }
+
+                string fullPath = Path.GetFullPath(files[fileIndex]);
+                if (!discoveredPaths.Add(fullPath))
+                    continue;
+                string className = match.Groups["class"].Value;
+                discovered.Add(new DiscoveredMask(
+                    fullPath, className, viewIndex, frameIndex, componentIndex));
+            }
         }
 
         discovered.Sort(DiscoveredMask.Compare);
@@ -261,22 +281,23 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         if (requests.Count == 0)
         {
             return Fail(
-                $"No masks matching CLASS_viewXX_componentYY.png and the configured views " +
-                $"were found in '{resolvedDirectory}'.",
+                "No masks matching CLASS_viewXX_componentYY.png/.jpg/.jpeg and the " +
+                "configured views were found in the selected directories.",
                 out error);
         }
 
 #if UNITY_EDITOR
         UnityEditor.Undo.RecordObject(this, "Discover projection masks");
 #endif
-        batchMaskDirectory = resolvedDirectory.Replace('\\', '/');
+        batchMaskDirectory = resolvedDirectories[0].Replace('\\', '/');
         masks = requests;
 #if UNITY_EDITOR
         UnityEditor.EditorUtility.SetDirty(this);
 #endif
         Debug.Log(
-            $"[MaskRaycastProjector] Discovered {masks.Count} mask(s) in " +
-            $"'{batchMaskDirectory}'. Ignored {ignoredPngCount} unmatched PNG(s) and " +
+            $"[MaskRaycastProjector] Discovered {masks.Count} mask(s) from " +
+            $"{resolvedDirectories.Count} folder(s). Ignored {ignoredImageCount} " +
+            "unmatched image(s) and " +
             $"{unmappedViewCount} mask(s) from unmapped view(s).",
             this);
         return true;
@@ -459,7 +480,7 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         return true;
     }
 
-    [ContextMenu("Export One Polygon Per Associated Building")]
+    [ContextMenu("Export One Polygon Per Class Cluster")]
     public void ExportOnePolygonPerAssociatedBuilding()
     {
         if (surfaceHits == null || surfaceHits.Count == 0)
@@ -485,14 +506,14 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         }
 
         string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture);
+        string safeClassName = SanitizeFileNameToken(polygonClassFilter);
         string outputPath = Path.Combine(
-            outputDirectory, $"associated_building_polygons_{timestamp}.geojson");
+            outputDirectory, $"clustered_{safeClassName}_polygons_{timestamp}.geojson");
         var options = new SurfaceHitPolygonExporter.Options
         {
             ClassFilter = polygonClassFilter,
-            MinimumSharedTriangles = minimumSharedTriangles,
-            MinimumTriangleOverlapRatio = minimumTriangleOverlapRatio,
-            MinimumViewsPerSupportedTriangle = minimumViewsPerSupportedTriangle
+            DbscanEpsilonMeters = dbscanEpsilonMeters,
+            DbscanMinimumPoints = dbscanMinimumPoints
         };
         if (!SurfaceHitPolygonExporter.TryExport(
                 surfaceHits,
@@ -509,10 +530,11 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         lastPolygonOutputPath = outputPath;
         Debug.Log(
             $"[MaskRaycastProjector] Exported {summary.ExportedPolygonCount} provisional " +
-            $"polygon(s) from {summary.DetectionCount} local detection(s) and " +
-            $"{summary.AssociationCount} cross-view association(s) to " +
-            $"'{lastPolygonOutputPath}'. Omitted {summary.OmittedCandidateCount} candidate(s) " +
-            "with fewer than three distinct WGS84 points.",
+            $"polygon(s) from {summary.GeoreferencedHitCount} georeferenced " +
+            $"'{polygonClassFilter}' hit(s) in {summary.ClusterCount} DBSCAN cluster(s) to " +
+            $"'{lastPolygonOutputPath}'. Omitted {summary.NoiseHitCount} noise hit(s) and " +
+            $"{summary.OmittedClusterCount} cluster(s) with fewer than three distinct " +
+            "WGS84 points.",
             this);
     }
 
@@ -640,7 +662,7 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             maskTexture = new Texture2D(2, 2, TextureFormat.RGBA32, false, true);
             byte[] bytes = File.ReadAllBytes(resolvedRequest.path);
             if (!ImageConversion.LoadImage(maskTexture, bytes, false))
-                return Fail($"Could not decode PNG mask '{resolvedRequest.path}'.", out error);
+                return Fail($"Could not decode mask image '{resolvedRequest.path}'.", out error);
 
             int projectionWidth = sourceFrameWidth > 1 ? sourceFrameWidth : maskTexture.width;
             int projectionHeight = sourceFrameHeight > 1 ? sourceFrameHeight : maskTexture.height;
@@ -982,6 +1004,32 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         return string.Empty;
     }
 
+    private List<string> ResolveBatchMaskDirectories()
+    {
+        var directories = new List<string>();
+        var uniqueDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string primaryDirectory = ResolveBatchMaskDirectory();
+        if (!string.IsNullOrWhiteSpace(primaryDirectory))
+        {
+            primaryDirectory = Path.GetFullPath(primaryDirectory);
+            if (uniqueDirectories.Add(primaryDirectory))
+                directories.Add(primaryDirectory);
+        }
+
+        if (additionalBatchMaskDirectories == null)
+            return directories;
+        for (int i = 0; i < additionalBatchMaskDirectories.Count; i++)
+        {
+            string rawDirectory = additionalBatchMaskDirectories[i];
+            if (string.IsNullOrWhiteSpace(rawDirectory))
+                continue;
+            string resolvedDirectory = ResolvePath(rawDirectory, maskPathRoot);
+            if (uniqueDirectories.Add(resolvedDirectory))
+                directories.Add(resolvedDirectory);
+        }
+        return directories;
+    }
+
     private string ResolveReportOutputDirectory()
     {
         if (!string.IsNullOrWhiteSpace(reportOutputDirectory))
@@ -1036,6 +1084,15 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             : value.ToString("R", CultureInfo.InvariantCulture);
     }
 
+    private static string SanitizeFileNameToken(string value)
+    {
+        string safe = string.IsNullOrWhiteSpace(value) ? "objects" : value.Trim();
+        char[] invalidCharacters = Path.GetInvalidFileNameChars();
+        for (int i = 0; i < invalidCharacters.Length; i++)
+            safe = safe.Replace(invalidCharacters[i], '_');
+        return safe.Replace(' ', '_').ToLowerInvariant();
+    }
+
     private static string ResolvePath(
         string rawPath, SrtDroneRaycastPlayer.FilePathRoot rootMode)
     {
@@ -1046,6 +1103,14 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         return Path.GetFullPath(Path.Combine(
             SrtDroneRaycastPlayer.GetPathRoot(rootMode),
             rawPath.Replace('/', Path.DirectorySeparatorChar)));
+    }
+
+    private static bool IsSupportedMaskImage(string fileName)
+    {
+        string extension = Path.GetExtension(fileName);
+        return string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(extension, ".jpg", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool Fail(string message, out string error)
