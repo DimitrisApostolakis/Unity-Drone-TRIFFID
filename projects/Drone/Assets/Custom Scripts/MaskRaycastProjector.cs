@@ -133,6 +133,12 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [Tooltip("Optional report folder. Leave empty to write beside the discovered masks.")]
     [SerializeField] private string reportOutputDirectory = string.Empty;
 
+    [Header("Provisional Polygon Export")]
+    [SerializeField] private string polygonClassFilter = "building";
+    [Min(1)] [SerializeField] private int minimumSharedTriangles = 1;
+    [Range(0.01f, 1f)] [SerializeField] private float minimumTriangleOverlapRatio = 0.1f;
+    [Min(1)] [SerializeField] private int minimumViewsPerSupportedTriangle = 2;
+
     [Header("Source Video Dimensions")]
     [Tooltip("Use zero to infer the width from each mask. Set this when masks were resized.")]
     [Min(0)] [SerializeField] private int sourceFrameWidth;
@@ -160,11 +166,13 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [NonSerialized] private List<MaskProjectionStats> projectionStats =
         new List<MaskProjectionStats>();
     [NonSerialized] private string lastProjectionReportPath = string.Empty;
+    [NonSerialized] private string lastPolygonOutputPath = string.Empty;
     private bool projectionInProgress;
 
     public IReadOnlyList<SurfaceHit> SurfaceHits => surfaceHits;
     public IReadOnlyList<MaskProjectionStats> ProjectionStats => projectionStats;
     public string LastProjectionReportPath => lastProjectionReportPath;
+    public string LastPolygonOutputPath => lastPolygonOutputPath;
 
     [ContextMenu("Discover Masks From Batch Directory")]
     public void DiscoverMasksFromBatchDirectory()
@@ -374,6 +382,7 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         surfaceHits.Clear();
         projectionStats.Clear();
         lastProjectionReportPath = string.Empty;
+        lastPolygonOutputPath = string.Empty;
     }
 
     [ContextMenu("Export Last Projection Report CSV")]
@@ -448,6 +457,63 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             $"'{lastProjectionReportPath}'.",
             this);
         return true;
+    }
+
+    [ContextMenu("Export One Polygon Per Associated Building")]
+    public void ExportOnePolygonPerAssociatedBuilding()
+    {
+        if (surfaceHits == null || surfaceHits.Count == 0)
+        {
+            Debug.LogError(
+                "[MaskRaycastProjector] Polygon export aborted: project the configured masks first.",
+                this);
+            return;
+        }
+
+        string outputDirectory;
+        try
+        {
+            outputDirectory = ResolveReportOutputDirectory();
+            Directory.CreateDirectory(outputDirectory);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError(
+                $"[MaskRaycastProjector] Polygon export aborted: {exception.Message}",
+                this);
+            return;
+        }
+
+        string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture);
+        string outputPath = Path.Combine(
+            outputDirectory, $"associated_building_polygons_{timestamp}.geojson");
+        var options = new SurfaceHitPolygonExporter.Options
+        {
+            ClassFilter = polygonClassFilter,
+            MinimumSharedTriangles = minimumSharedTriangles,
+            MinimumTriangleOverlapRatio = minimumTriangleOverlapRatio,
+            MinimumViewsPerSupportedTriangle = minimumViewsPerSupportedTriangle
+        };
+        if (!SurfaceHitPolygonExporter.TryExport(
+                surfaceHits,
+                player,
+                outputPath,
+                options,
+                out SurfaceHitPolygonExporter.ExportSummary summary,
+                out string error))
+        {
+            Debug.LogError($"[MaskRaycastProjector] Polygon export aborted: {error}", this);
+            return;
+        }
+
+        lastPolygonOutputPath = outputPath;
+        Debug.Log(
+            $"[MaskRaycastProjector] Exported {summary.ExportedPolygonCount} provisional " +
+            $"polygon(s) from {summary.DetectionCount} local detection(s) and " +
+            $"{summary.AssociationCount} cross-view association(s) to " +
+            $"'{lastPolygonOutputPath}'. Omitted {summary.OmittedCandidateCount} candidate(s) " +
+            "with fewer than three distinct WGS84 points.",
+            this);
     }
 
     private void OnDrawGizmosSelected()

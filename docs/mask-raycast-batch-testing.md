@@ -53,3 +53,30 @@ still be written with **Export Last Projection Report CSV**.
 - **Color Gizmos By View** assigns a different color to each view.
 - **Max Gizmo Hits** limits only visualization; it does not remove stored hits or CSV statistics.
 
+## Provisional building polygons
+
+After projecting the complete batch, choose **Export One Polygon Per Associated Building** from
+the component menu. The exporter does not create one polygon per mask. Instead, it:
+
+1. represents every local component by the set of `(collider, triangle)` pairs it hit;
+2. associates same-class components from different views when their triangle-overlap threshold
+   is satisfied;
+3. applies the associations transitively to form physical-building candidates;
+4. prefers hits on triangles supported by at least two views; and
+5. creates one horizontal convex hull per associated candidate and converts it to WGS84.
+
+The timestamped `associated_building_polygons_*.geojson` is written to the same output directory
+as the CSV report. Every feature records its source detection IDs, view indices, raw hit count,
+polygon hit count, and whether multi-view triangle support was available.
+
+The default settings are deliberately provisional:
+
+- **Polygon Class Filter:** `building`
+- **Minimum Shared Triangles:** `1`
+- **Minimum Triangle Overlap Ratio:** `0.1`
+- **Minimum Views Per Supported Triangle:** `2`
+
+Candidates with fewer than three distinct WGS84 points cannot form a valid polygon and are
+reported as omitted. Raw hits remain unchanged. Triangle overlap can still under-merge buildings
+whose visible surfaces differ completely across views or over-merge objects on coarse collider
+triangles; reprojection validation is the next association stage.
