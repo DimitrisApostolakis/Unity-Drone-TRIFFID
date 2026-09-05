@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
 using UnityEngine;
 
 /// <summary>
@@ -20,12 +23,91 @@ public sealed class MaskProjectionRequest
     [Range(0f, 1f)] public float confidence = 1f;
 }
 
+[Serializable]
+public sealed class MaskViewFrameMapping
+{
+    [Min(0)] public int viewIndex;
+    [Min(0)] public int frameIndex;
+
+    public MaskViewFrameMapping(int viewIndex, int frameIndex)
+    {
+        this.viewIndex = viewIndex;
+        this.frameIndex = frameIndex;
+    }
+}
+
+/// <summary>
+/// Per-mask measurements retained after the most recent projection batch and written to CSV.
+/// These are diagnostic measurements only; they do not filter the raw SurfaceHit collection.
+/// </summary>
+public sealed class MaskProjectionStats
+{
+    public string MaskPath { get; }
+    public int ViewIndex { get; }
+    public int FrameIndex { get; }
+    public string LocalDetectionId { get; }
+    public string ClassName { get; }
+    public int MaskWidth { get; }
+    public int MaskHeight { get; }
+    public int ForegroundPixels { get; }
+    public int ErodedForegroundPixels { get; }
+    public int Samples { get; }
+    public int Hits { get; }
+    public int Misses => Samples - Hits;
+    public float HitRate => Samples > 0 ? (float)Hits / Samples : 0f;
+    public int UniqueColliders { get; }
+    public int UniqueTriangles { get; }
+    public float MinimumHitDistance { get; }
+    public float MedianHitDistance { get; }
+    public float MeanHitDistance { get; }
+    public float MaximumHitDistance { get; }
+
+    public MaskProjectionStats(
+        string maskPath,
+        MaskProjectionRequest request,
+        int maskWidth,
+        int maskHeight,
+        int foregroundPixels,
+        int erodedForegroundPixels,
+        int samples,
+        int hits,
+        int uniqueColliders,
+        int uniqueTriangles,
+        float minimumHitDistance,
+        float medianHitDistance,
+        float meanHitDistance,
+        float maximumHitDistance)
+    {
+        MaskPath = maskPath;
+        ViewIndex = request.viewIndex;
+        FrameIndex = request.frameIndex;
+        LocalDetectionId = request.localDetectionId;
+        ClassName = request.className;
+        MaskWidth = maskWidth;
+        MaskHeight = maskHeight;
+        ForegroundPixels = foregroundPixels;
+        ErodedForegroundPixels = erodedForegroundPixels;
+        Samples = samples;
+        Hits = hits;
+        UniqueColliders = uniqueColliders;
+        UniqueTriangles = uniqueTriangles;
+        MinimumHitDistance = minimumHitDistance;
+        MedianHitDistance = medianHitDistance;
+        MeanHitDistance = meanHitDistance;
+        MaximumHitDistance = maximumHitDistance;
+    }
+}
+
 /// <summary>
 /// Loads binary semantic masks, samples their eroded boundary and interior, configures the
 /// authoritative SRT camera for each original frame, and retains the complete mesh raycast hits.
 /// </summary>
 public sealed class MaskRaycastProjector : MonoBehaviour
 {
+    private static readonly Regex BatchMaskFileNameRegex = new Regex(
+        @"^(?<class>.+)_view(?<view>\d+)_component(?<component>\d+)\.png$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     [Header("Projection Engine")]
     [SerializeField] private SrtDroneRaycastPlayer player;
 
@@ -33,6 +115,23 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [SerializeField] private SrtDroneRaycastPlayer.FilePathRoot maskPathRoot =
         SrtDroneRaycastPlayer.FilePathRoot.ProjectRoot;
     [SerializeField] private List<MaskProjectionRequest> masks = new List<MaskProjectionRequest>();
+
+    [Header("Batch Discovery And Report")]
+    [Tooltip("Folder containing CLASS_viewXX_componentYY.png masks. Leave empty to use the " +
+             "folder of the first configured mask.")]
+    [SerializeField] private string batchMaskDirectory = string.Empty;
+    [SerializeField] private List<MaskViewFrameMapping> viewFrameMappings =
+        new List<MaskViewFrameMapping>
+        {
+            new MaskViewFrameMapping(0, 0),
+            new MaskViewFrameMapping(1, 1440),
+            new MaskViewFrameMapping(2, 2250),
+            new MaskViewFrameMapping(3, 3300)
+        };
+    [Tooltip("Write one timestamped CSV beside the masks after every successful projection.")]
+    [SerializeField] private bool exportCsvAfterProjection = true;
+    [Tooltip("Optional report folder. Leave empty to write beside the discovered masks.")]
+    [SerializeField] private string reportOutputDirectory = string.Empty;
 
     [Header("Source Video Dimensions")]
     [Tooltip("Use zero to infer the width from each mask. Set this when masks were resized.")]
@@ -51,11 +150,129 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [Min(1)] [SerializeField] private int maxGizmoHits = 2000;
     [Min(0.001f)] [SerializeField] private float hitGizmoRadius = 0.08f;
     [SerializeField] private Color hitGizmoColor = new Color(0f, 1f, 0.75f, 0.85f);
+    [Tooltip("Use -1 to draw hits from every view.")]
+    [SerializeField] private int gizmoViewFilter = -1;
+    [Tooltip("Exact local detection ID to draw. Leave empty to draw every detection.")]
+    [SerializeField] private string gizmoDetectionFilter = string.Empty;
+    [SerializeField] private bool colorGizmosByView = true;
 
     [NonSerialized] private List<SurfaceHit> surfaceHits = new List<SurfaceHit>();
+    [NonSerialized] private List<MaskProjectionStats> projectionStats =
+        new List<MaskProjectionStats>();
+    [NonSerialized] private string lastProjectionReportPath = string.Empty;
     private bool projectionInProgress;
 
     public IReadOnlyList<SurfaceHit> SurfaceHits => surfaceHits;
+    public IReadOnlyList<MaskProjectionStats> ProjectionStats => projectionStats;
+    public string LastProjectionReportPath => lastProjectionReportPath;
+
+    [ContextMenu("Discover Masks From Batch Directory")]
+    public void DiscoverMasksFromBatchDirectory()
+    {
+        if (!TryDiscoverMasksFromBatchDirectory(out string error))
+            Debug.LogError($"[MaskRaycastProjector] Mask discovery aborted: {error}", this);
+    }
+
+    public bool TryDiscoverMasksFromBatchDirectory(out string error)
+    {
+        error = string.Empty;
+        string resolvedDirectory;
+        try
+        {
+            resolvedDirectory = ResolveBatchMaskDirectory();
+        }
+        catch (Exception exception)
+        {
+            return Fail($"Invalid batch mask directory: {exception.Message}", out error);
+        }
+
+        if (string.IsNullOrWhiteSpace(resolvedDirectory) || !Directory.Exists(resolvedDirectory))
+            return Fail($"Batch mask directory does not exist: '{resolvedDirectory}'.", out error);
+
+        EnsureDefaultViewFrameMappings();
+        var framesByView = new Dictionary<int, int>();
+        for (int i = 0; i < viewFrameMappings.Count; i++)
+        {
+            MaskViewFrameMapping mapping = viewFrameMappings[i];
+            if (mapping == null)
+                return Fail($"View/frame mapping {i} is null.", out error);
+            if (mapping.viewIndex < 0 || mapping.frameIndex < 0)
+                return Fail($"View/frame mapping {i} contains a negative value.", out error);
+            if (framesByView.ContainsKey(mapping.viewIndex))
+                return Fail($"View {mapping.viewIndex} has more than one frame mapping.", out error);
+            framesByView.Add(mapping.viewIndex, mapping.frameIndex);
+        }
+
+        string[] files = Directory.GetFiles(resolvedDirectory, "*", SearchOption.TopDirectoryOnly);
+        var discovered = new List<DiscoveredMask>();
+        int ignoredPngCount = 0;
+        int unmappedViewCount = 0;
+        for (int i = 0; i < files.Length; i++)
+        {
+            string fileName = Path.GetFileName(files[i]);
+            if (!string.Equals(Path.GetExtension(fileName), ".png", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            Match match = BatchMaskFileNameRegex.Match(fileName);
+            if (!match.Success ||
+                !int.TryParse(match.Groups["view"].Value, NumberStyles.None,
+                    CultureInfo.InvariantCulture, out int viewIndex) ||
+                !int.TryParse(match.Groups["component"].Value, NumberStyles.None,
+                    CultureInfo.InvariantCulture, out int componentIndex))
+            {
+                ignoredPngCount++;
+                continue;
+            }
+            if (!framesByView.TryGetValue(viewIndex, out int frameIndex))
+            {
+                unmappedViewCount++;
+                continue;
+            }
+
+            string className = match.Groups["class"].Value;
+            discovered.Add(new DiscoveredMask(
+                files[i], className, viewIndex, frameIndex, componentIndex));
+        }
+
+        discovered.Sort(DiscoveredMask.Compare);
+        var requests = new List<MaskProjectionRequest>(discovered.Count);
+        for (int i = 0; i < discovered.Count; i++)
+        {
+            DiscoveredMask item = discovered[i];
+            requests.Add(new MaskProjectionRequest
+            {
+                maskPath = item.path.Replace('\\', '/'),
+                viewIndex = item.viewIndex,
+                frameIndex = item.frameIndex,
+                localDetectionId = Path.GetFileNameWithoutExtension(item.path),
+                className = item.className,
+                confidence = 1f
+            });
+        }
+
+        if (requests.Count == 0)
+        {
+            return Fail(
+                $"No masks matching CLASS_viewXX_componentYY.png and the configured views " +
+                $"were found in '{resolvedDirectory}'.",
+                out error);
+        }
+
+#if UNITY_EDITOR
+        UnityEditor.Undo.RecordObject(this, "Discover projection masks");
+#endif
+        batchMaskDirectory = resolvedDirectory.Replace('\\', '/');
+        masks = requests;
+#if UNITY_EDITOR
+        UnityEditor.EditorUtility.SetDirty(this);
+#endif
+        Debug.Log(
+            $"[MaskRaycastProjector] Discovered {masks.Count} mask(s) in " +
+            $"'{batchMaskDirectory}'. Ignored {ignoredPngCount} unmatched PNG(s) and " +
+            $"{unmappedViewCount} mask(s) from unmapped view(s).",
+            this);
+        return true;
+    }
 
     [ContextMenu("Project Configured Masks To Surface")]
     public void ProjectConfiguredMasks()
@@ -91,19 +308,31 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                 return Fail($"Projection preparation failed: {preparationError}", out error);
 
             var projectedHits = new List<SurfaceHit>();
+            var projectedStats = new List<MaskProjectionStats>();
             var colliderPaths = new Dictionary<int, string>();
             for (int i = 0; i < resolvedRequests.Count; i++)
             {
                 if (!TryProjectMask(
-                        resolvedRequests[i], projectedHits, colliderPaths, out error))
+                        resolvedRequests[i], projectedHits, colliderPaths,
+                        out MaskProjectionStats maskStats, out error))
                     return false;
+                projectedStats.Add(maskStats);
             }
 
             surfaceHits = projectedHits;
+            projectionStats = projectedStats;
             Debug.Log(
                 $"[MaskRaycastProjector] Retained {surfaceHits.Count} surface hit(s) " +
                 $"from {resolvedRequests.Count} mask(s).",
                 this);
+            if (exportCsvAfterProjection &&
+                !TryExportLastProjectionReport(out string reportError))
+            {
+                Debug.LogWarning(
+                    $"[MaskRaycastProjector] Projection succeeded, but the CSV report could " +
+                    $"not be written: {reportError}",
+                    this);
+            }
             return true;
         }
         catch (Exception exception)
@@ -143,6 +372,82 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     public void ClearSurfaceHits()
     {
         surfaceHits.Clear();
+        projectionStats.Clear();
+        lastProjectionReportPath = string.Empty;
+    }
+
+    [ContextMenu("Export Last Projection Report CSV")]
+    public void ExportLastProjectionReport()
+    {
+        if (!TryExportLastProjectionReport(out string error))
+            Debug.LogError($"[MaskRaycastProjector] CSV export aborted: {error}", this);
+    }
+
+    public bool TryExportLastProjectionReport(out string error)
+    {
+        error = string.Empty;
+        if (projectionStats == null || projectionStats.Count == 0)
+            return Fail("There are no projection statistics to export.", out error);
+
+        string outputDirectory;
+        try
+        {
+            outputDirectory = ResolveReportOutputDirectory();
+            Directory.CreateDirectory(outputDirectory);
+        }
+        catch (Exception exception)
+        {
+            return Fail($"Invalid report output directory: {exception.Message}", out error);
+        }
+
+        string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture);
+        string outputPath = Path.Combine(
+            outputDirectory, $"mask_projection_report_{timestamp}.csv");
+        var csv = new StringBuilder();
+        csv.AppendLine(
+            "mask_path,view_index,frame_index,local_detection_id,class_name," +
+            "mask_width,mask_height,foreground_pixels,eroded_foreground_pixels," +
+            "samples,hits,misses,hit_rate,unique_colliders,unique_triangles," +
+            "min_hit_distance,median_hit_distance,mean_hit_distance,max_hit_distance");
+        for (int i = 0; i < projectionStats.Count; i++)
+        {
+            MaskProjectionStats stats = projectionStats[i];
+            csv.Append(CsvEscape(stats.MaskPath)).Append(',')
+                .Append(stats.ViewIndex).Append(',')
+                .Append(stats.FrameIndex).Append(',')
+                .Append(CsvEscape(stats.LocalDetectionId)).Append(',')
+                .Append(CsvEscape(stats.ClassName)).Append(',')
+                .Append(stats.MaskWidth).Append(',')
+                .Append(stats.MaskHeight).Append(',')
+                .Append(stats.ForegroundPixels).Append(',')
+                .Append(stats.ErodedForegroundPixels).Append(',')
+                .Append(stats.Samples).Append(',')
+                .Append(stats.Hits).Append(',')
+                .Append(stats.Misses).Append(',')
+                .Append(stats.HitRate.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                .Append(stats.UniqueColliders).Append(',')
+                .Append(stats.UniqueTriangles).Append(',')
+                .Append(FiniteFloatOrEmpty(stats.MinimumHitDistance)).Append(',')
+                .Append(FiniteFloatOrEmpty(stats.MedianHitDistance)).Append(',')
+                .Append(FiniteFloatOrEmpty(stats.MeanHitDistance)).Append(',')
+                .Append(FiniteFloatOrEmpty(stats.MaximumHitDistance)).AppendLine();
+        }
+
+        try
+        {
+            File.WriteAllText(outputPath, csv.ToString(), new UTF8Encoding(false));
+        }
+        catch (Exception exception)
+        {
+            return Fail($"Could not write '{outputPath}': {exception.Message}", out error);
+        }
+
+        lastProjectionReportPath = outputPath;
+        Debug.Log(
+            $"[MaskRaycastProjector] Wrote {projectionStats.Count} mask report row(s) to " +
+            $"'{lastProjectionReportPath}'.",
+            this);
+        return true;
     }
 
     private void OnDrawGizmosSelected()
@@ -150,15 +455,50 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         if (!drawHitGizmos || surfaceHits == null || surfaceHits.Count == 0)
             return;
 
-        Gizmos.color = hitGizmoColor;
-        int count = Math.Min(surfaceHits.Count, Math.Max(1, maxGizmoHits));
-        int step = Math.Max(1, surfaceHits.Count / count);
-        int drawn = 0;
-        for (int i = 0; i < surfaceHits.Count && drawn < count; i += step)
+        int eligibleCount = 0;
+        for (int i = 0; i < surfaceHits.Count; i++)
         {
+            if (ShouldDrawHit(surfaceHits[i]))
+                eligibleCount++;
+        }
+        if (eligibleCount == 0)
+            return;
+
+        int count = Math.Min(eligibleCount, Math.Max(1, maxGizmoHits));
+        int step = Math.Max(1, Mathf.CeilToInt((float)eligibleCount / count));
+        int eligibleIndex = 0;
+        int drawn = 0;
+        for (int i = 0; i < surfaceHits.Count && drawn < count; i++)
+        {
+            SurfaceHit hit = surfaceHits[i];
+            if (!ShouldDrawHit(hit))
+                continue;
+            if (eligibleIndex++ % step != 0)
+                continue;
+
+            Gizmos.color = colorGizmosByView
+                ? GetViewGizmoColor(hit.ViewIndex)
+                : hitGizmoColor;
             Gizmos.DrawSphere(surfaceHits[i].WorldPoint, Math.Max(0.001f, hitGizmoRadius));
             drawn++;
         }
+    }
+
+    private bool ShouldDrawHit(SurfaceHit hit)
+    {
+        if (gizmoViewFilter >= 0 && hit.ViewIndex != gizmoViewFilter)
+            return false;
+        return string.IsNullOrWhiteSpace(gizmoDetectionFilter) ||
+               string.Equals(
+                   hit.LocalDetectionId, gizmoDetectionFilter.Trim(),
+                   StringComparison.Ordinal);
+    }
+
+    private Color GetViewGizmoColor(int viewIndex)
+    {
+        Color color = Color.HSVToRGB(Mathf.Repeat(viewIndex * 0.217f, 1f), 0.8f, 1f);
+        color.a = hitGizmoColor.a;
+        return color;
     }
 
     private bool TryValidateConfiguration(
@@ -222,8 +562,10 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         ResolvedMaskRequest resolvedRequest,
         List<SurfaceHit> output,
         Dictionary<int, string> colliderPaths,
+        out MaskProjectionStats stats,
         out string error)
     {
+        stats = null;
         error = string.Empty;
         MaskProjectionRequest request = resolvedRequest.request;
         Texture2D maskTexture = null;
@@ -266,13 +608,15 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                     out error);
             bool[] eroded = ErodeMask(
                 foreground, maskTexture.width, maskTexture.height, erosionRadiusPixels);
-            if (erosionRadiusPixels > 0 && CountTrue(eroded) == 0)
+            int erodedForegroundCount = CountTrue(eroded);
+            if (erosionRadiusPixels > 0 && erodedForegroundCount == 0)
             {
                 Debug.LogWarning(
                     $"[MaskRaycastProjector] {request.localDetectionId}: erosion removed the entire " +
                     "component; sampling the original mask instead.",
                     this);
                 eroded = foreground;
+                erodedForegroundCount = foregroundCount;
             }
             List<int> sampleIndices = CollectSampleIndices(
                 eroded,
@@ -282,6 +626,9 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                 interiorStridePixels);
 
             int initialHitCount = output.Count;
+            var uniqueColliders = new HashSet<int>();
+            var uniqueTriangles = new HashSet<long>();
+            var hitDistances = new List<float>();
             for (int i = 0; i < sampleIndices.Count; i++)
             {
                 int index = sampleIndices[i];
@@ -304,6 +651,15 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                     colliderPaths.Add(colliderInstanceId, colliderPath);
                 }
 
+                uniqueColliders.Add(colliderInstanceId);
+                if (raycastHit.triangleIndex >= 0)
+                {
+                    long triangleKey = ((long)colliderInstanceId << 32) ^
+                                       (uint)raycastHit.triangleIndex;
+                    uniqueTriangles.Add(triangleKey);
+                }
+                hitDistances.Add(raycastHit.distance);
+
                 output.Add(new SurfaceHit(
                     raycastHit,
                     ray,
@@ -316,6 +672,27 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             }
 
             int hitCount = output.Count - initialHitCount;
+            CalculateDistanceSummary(
+                hitDistances,
+                out float minimumHitDistance,
+                out float medianHitDistance,
+                out float meanHitDistance,
+                out float maximumHitDistance);
+            stats = new MaskProjectionStats(
+                resolvedRequest.path,
+                request,
+                maskTexture.width,
+                maskTexture.height,
+                foregroundCount,
+                erodedForegroundCount,
+                sampleIndices.Count,
+                hitCount,
+                uniqueColliders.Count,
+                uniqueTriangles.Count,
+                minimumHitDistance,
+                medianHitDistance,
+                meanHitDistance,
+                maximumHitDistance);
             Debug.Log(
                 $"[MaskRaycastProjector] {request.localDetectionId}: " +
                 $"{sampleIndices.Count} sample(s), {hitCount} mesh hit(s), " +
@@ -510,6 +887,89 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         return Math.Abs(left - right) <= 0.001;
     }
 
+    private void EnsureDefaultViewFrameMappings()
+    {
+        if (viewFrameMappings != null && viewFrameMappings.Count > 0)
+            return;
+
+        viewFrameMappings = new List<MaskViewFrameMapping>
+        {
+            new MaskViewFrameMapping(0, 0),
+            new MaskViewFrameMapping(1, 1440),
+            new MaskViewFrameMapping(2, 2250),
+            new MaskViewFrameMapping(3, 3300)
+        };
+    }
+
+    private string ResolveBatchMaskDirectory()
+    {
+        if (!string.IsNullOrWhiteSpace(batchMaskDirectory))
+            return ResolvePath(batchMaskDirectory, maskPathRoot);
+
+        if (masks != null && masks.Count > 0 && masks[0] != null &&
+            !string.IsNullOrWhiteSpace(masks[0].maskPath))
+        {
+            string firstMaskPath = ResolvePath(masks[0].maskPath, maskPathRoot);
+            return Path.GetDirectoryName(firstMaskPath);
+        }
+
+        return string.Empty;
+    }
+
+    private string ResolveReportOutputDirectory()
+    {
+        if (!string.IsNullOrWhiteSpace(reportOutputDirectory))
+            return ResolvePath(reportOutputDirectory, maskPathRoot);
+
+        string batchDirectory = ResolveBatchMaskDirectory();
+        if (!string.IsNullOrWhiteSpace(batchDirectory))
+            return batchDirectory;
+
+        if (projectionStats != null && projectionStats.Count > 0)
+            return Path.GetDirectoryName(projectionStats[0].MaskPath);
+
+        return string.Empty;
+    }
+
+    private static void CalculateDistanceSummary(
+        List<float> distances,
+        out float minimum,
+        out float median,
+        out float mean,
+        out float maximum)
+    {
+        if (distances == null || distances.Count == 0)
+        {
+            minimum = median = mean = maximum = float.NaN;
+            return;
+        }
+
+        distances.Sort();
+        minimum = distances[0];
+        maximum = distances[distances.Count - 1];
+        double sum = 0.0;
+        for (int i = 0; i < distances.Count; i++)
+            sum += distances[i];
+        mean = (float)(sum / distances.Count);
+        int middle = distances.Count / 2;
+        median = distances.Count % 2 == 1
+            ? distances[middle]
+            : (distances[middle - 1] + distances[middle]) * 0.5f;
+    }
+
+    private static string CsvEscape(string value)
+    {
+        string safe = value ?? string.Empty;
+        return $"\"{safe.Replace("\"", "\"\"")}\"";
+    }
+
+    private static string FiniteFloatOrEmpty(float value)
+    {
+        return float.IsNaN(value) || float.IsInfinity(value)
+            ? string.Empty
+            : value.ToString("R", CultureInfo.InvariantCulture);
+    }
+
     private static string ResolvePath(
         string rawPath, SrtDroneRaycastPlayer.FilePathRoot rootMode)
     {
@@ -537,6 +997,40 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         {
             this.request = request;
             this.path = path;
+        }
+    }
+
+    private readonly struct DiscoveredMask
+    {
+        public readonly string path;
+        public readonly string className;
+        public readonly int viewIndex;
+        public readonly int frameIndex;
+        public readonly int componentIndex;
+
+        public DiscoveredMask(
+            string path, string className, int viewIndex, int frameIndex, int componentIndex)
+        {
+            this.path = path;
+            this.className = className;
+            this.viewIndex = viewIndex;
+            this.frameIndex = frameIndex;
+            this.componentIndex = componentIndex;
+        }
+
+        public static int Compare(DiscoveredMask left, DiscoveredMask right)
+        {
+            int viewComparison = left.viewIndex.CompareTo(right.viewIndex);
+            if (viewComparison != 0)
+                return viewComparison;
+            int classComparison = string.Compare(
+                left.className, right.className, StringComparison.Ordinal);
+            if (classComparison != 0)
+                return classComparison;
+            int componentComparison = left.componentIndex.CompareTo(right.componentIndex);
+            if (componentComparison != 0)
+                return componentComparison;
+            return string.Compare(left.path, right.path, StringComparison.Ordinal);
         }
     }
 
