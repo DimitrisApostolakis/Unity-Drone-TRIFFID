@@ -705,6 +705,28 @@ public sealed class GeoJsonDetectionGeoreferencer : MonoBehaviour
         out JArray coordinate)
     {
         coordinate = null;
+        if (!TryProjectPixelToSurface(
+                pixel, context, feature, coordinateIndex, out RaycastHit hit))
+            return false;
+        if (!player.TryConvertWorldToWgs84(
+                hit.point, out double longitude, out double latitude, out double altitude))
+            return false;
+
+        coordinate = new JArray(longitude, latitude, altitude);
+        return true;
+    }
+
+    /// <summary>
+    /// Keeps the complete mesh hit available before the legacy GeoJSON path reduces it to WGS84.
+    /// </summary>
+    private bool TryProjectPixelToSurface(
+        Vector2d pixel,
+        InputContext context,
+        InputFeature feature,
+        int coordinateIndex,
+        out RaycastHit hit)
+    {
+        hit = default;
         if (feature.pixelIsValid == null || coordinateIndex < 0 ||
             coordinateIndex >= feature.pixelIsValid.Length || !feature.pixelIsValid[coordinateIndex])
             return false;
@@ -715,14 +737,7 @@ public sealed class GeoJsonDetectionGeoreferencer : MonoBehaviour
         if (camera == null)
             return false;
         Ray ray = camera.ViewportPointToRay(new Vector3((float)normalizedX, (float)normalizedYFromBottom, 0f));
-        if (!player.TryRaycastMap(ray, out RaycastHit hit))
-            return false;
-        if (!player.TryConvertWorldToWgs84(
-                hit.point, out double longitude, out double latitude, out double altitude))
-            return false;
-
-        coordinate = new JArray(longitude, latitude, altitude);
-        return true;
+        return player.TryRaycastMap(ray, out hit);
     }
 
     private static bool TryNormalizePixel(
