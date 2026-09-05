@@ -169,6 +169,9 @@ public static class SurfaceHitPolygonExporter
             ["features"] = features
         };
 
+        if (!TryValidatePolygonFeatures(features, out error))
+            return false;
+
         try
         {
             string directory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
@@ -291,6 +294,8 @@ public static class SurfaceHitPolygonExporter
         for (int i = 0; i < hull.Count; i++)
             ring.Add(new JArray(hull[i].Longitude, hull[i].Latitude));
         ring.Add(new JArray(hull[0].Longitude, hull[0].Latitude));
+        var polygonCoordinates = new JArray();
+        polygonCoordinates.Add(ring);
 
         detectionIds.Sort(StringComparer.Ordinal);
         var sortedViews = new List<int>(viewIndices);
@@ -315,10 +320,68 @@ public static class SurfaceHitPolygonExporter
             ["geometry"] = new JObject
             {
                 ["type"] = "Polygon",
-                ["coordinates"] = new JArray(ring)
+                ["coordinates"] = polygonCoordinates
             }
         };
         return true;
+    }
+
+    private static bool TryValidatePolygonFeatures(JArray features, out string error)
+    {
+        error = string.Empty;
+        for (int featureIndex = 0; featureIndex < features.Count; featureIndex++)
+        {
+            JObject feature = features[featureIndex] as JObject;
+            JObject geometry = feature?["geometry"] as JObject;
+            JArray coordinates = geometry?["coordinates"] as JArray;
+            if (geometry == null ||
+                !string.Equals((string)geometry["type"], "Polygon", StringComparison.Ordinal) ||
+                coordinates == null || coordinates.Count == 0)
+            {
+                return Fail(
+                    $"Generated feature {featureIndex} does not contain valid Polygon coordinates.",
+                    out error);
+            }
+
+            for (int ringIndex = 0; ringIndex < coordinates.Count; ringIndex++)
+            {
+                JArray ring = coordinates[ringIndex] as JArray;
+                if (ring == null || ring.Count < 4)
+                {
+                    return Fail(
+                        $"Generated feature {featureIndex}, ring {ringIndex} has fewer than " +
+                        "four positions.",
+                        out error);
+                }
+
+                for (int positionIndex = 0; positionIndex < ring.Count; positionIndex++)
+                {
+                    JArray position = ring[positionIndex] as JArray;
+                    if (position == null || position.Count < 2 ||
+                        !IsNumeric(position[0]) || !IsNumeric(position[1]))
+                    {
+                        return Fail(
+                            $"Generated feature {featureIndex}, ring {ringIndex}, position " +
+                            $"{positionIndex} is not a numeric longitude/latitude pair.",
+                            out error);
+                    }
+                }
+
+                if (!JToken.DeepEquals(ring[0], ring[ring.Count - 1]))
+                {
+                    return Fail(
+                        $"Generated feature {featureIndex}, ring {ringIndex} is not closed.",
+                        out error);
+                }
+            }
+        }
+        return true;
+    }
+
+    private static bool IsNumeric(JToken token)
+    {
+        return token != null &&
+               (token.Type == JTokenType.Integer || token.Type == JTokenType.Float);
     }
 
     private static List<GeoPoint> ConvertToGeoPoints(
