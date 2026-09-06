@@ -8,7 +8,8 @@ using Newtonsoft.Json.Linq;
 public enum SurfaceHitClusterAssociationMode
 {
     DominantClusterPerDetection = 0,
-    AggregateClassMask = 1
+    AggregateClassMask = 1,
+    MultiViewConsensus = 2
 }
 
 /// <summary>
@@ -33,6 +34,10 @@ public static class SurfaceHitPolygonExporter
         public float SimplificationToleranceMeters = 0.5f;
         public SurfaceHitClusterAssociationMode ClusterAssociationMode =
             SurfaceHitClusterAssociationMode.DominantClusterPerDetection;
+        public float ConsensusGridCellSizeMeters = 0.5f;
+        public float ConsensusOverlapToleranceMeters = 1.25f;
+        public int ConsensusMinimumSupportingViews = 2;
+        public float ConsensusSingleViewExpansionDistanceMeters = 1.5f;
         public bool ExcludeSemanticConflicts = true;
         public string SemanticConflictClassFilters = "green_trees,tree,vegetation";
         public float SemanticConflictDistanceMeters = 1.5f;
@@ -51,6 +56,9 @@ public static class SurfaceHitPolygonExporter
         public readonly int SuppressedClusterCount;
         public readonly int SemanticConflictSourceHitCount;
         public readonly int RejectedSemanticConflictCount;
+        public readonly int ConsensusAvailableViewCount;
+        public readonly int ConsensusConfirmedCellCount;
+        public readonly int ConsensusExpandedCoreHitCount;
         public readonly int ExportedPolygonCount;
         public readonly int OmittedClusterCount;
 
@@ -64,6 +72,9 @@ public static class SurfaceHitPolygonExporter
             int suppressedClusterCount,
             int semanticConflictSourceHitCount,
             int rejectedSemanticConflictCount,
+            int consensusAvailableViewCount,
+            int consensusConfirmedCellCount,
+            int consensusExpandedCoreHitCount,
             int exportedPolygonCount,
             int omittedClusterCount)
         {
@@ -76,6 +87,9 @@ public static class SurfaceHitPolygonExporter
             SuppressedClusterCount = suppressedClusterCount;
             SemanticConflictSourceHitCount = semanticConflictSourceHitCount;
             RejectedSemanticConflictCount = rejectedSemanticConflictCount;
+            ConsensusAvailableViewCount = consensusAvailableViewCount;
+            ConsensusConfirmedCellCount = consensusConfirmedCellCount;
+            ConsensusExpandedCoreHitCount = consensusExpandedCoreHitCount;
             ExportedPolygonCount = exportedPolygonCount;
             OmittedClusterCount = omittedClusterCount;
         }
@@ -130,35 +144,43 @@ public static class SurfaceHitPolygonExporter
                     options.SemanticConflictDistanceMeters,
                     null)
                 : new Dictionary<GridKey, List<int>>();
-        int[] labels = RunDbscan(
-            corePoints,
-            options.DbscanEpsilonMeters,
-            options.DbscanMinimumPoints,
-            out int rawClusterCount,
-            out int noiseHitCount);
-        if (rawClusterCount == 0)
-        {
-            return Fail(
-                "DBSCAN did not find any core cluster. Reduce DBSCAN minimum points or " +
-                "increase epsilon.",
-                out error);
-        }
-
         List<List<ClusterPoint>> coreClusters;
         bool[] retainedCorePoints;
         int suppressedClusterCount;
         List<List<ClusterPoint>> boundaryClusters;
         int assignedBoundaryHitCount;
         string clusteringMethod;
+        int[] labels;
+        int rawClusterCount;
+        int noiseHitCount;
+        int consensusAvailableViewCount = 0;
+        int consensusConfirmedCellCount = 0;
+        int consensusExpandedCoreHitCount = 0;
+        List<ClusterConsensusStats> consensusStats = null;
         if (options.ClusterAssociationMode ==
-            SurfaceHitClusterAssociationMode.AggregateClassMask)
+            SurfaceHitClusterAssociationMode.MultiViewConsensus)
         {
-            BuildAllCoreClusters(
+            BuildMultiViewConsensusClusters(
                 corePoints,
-                labels,
-                rawClusterCount,
+                options,
                 out coreClusters,
-                out retainedCorePoints);
+                out labels,
+                out retainedCorePoints,
+                out consensusStats,
+                out consensusAvailableViewCount,
+                out consensusConfirmedCellCount,
+                out consensusExpandedCoreHitCount,
+                out noiseHitCount);
+            rawClusterCount = coreClusters.Count;
+            if (rawClusterCount == 0)
+            {
+                return Fail(
+                    $"Multi-view consensus found no cells supported by at least " +
+                    $"{options.ConsensusMinimumSupportingViews} distinct views. " +
+                    $"Available building views: {consensusAvailableViewCount}. Reduce the " +
+                    "minimum supporting views or increase overlap tolerance.",
+                    out error);
+            }
             suppressedClusterCount = 0;
             boundaryClusters = AssignBoundaryPointsToNearestCluster(
                 boundaryPoints,
@@ -168,30 +190,73 @@ public static class SurfaceHitPolygonExporter
                 coreClusters,
                 options.BoundaryAssignmentDistanceMeters,
                 out assignedBoundaryHitCount);
-            clusteringMethod = "dbscan_all_class_hits_nearest_boundary_cluster";
+            clusteringMethod = "multi_view_consensus_grid_connected_components";
         }
         else
         {
-            Dictionary<string, int> dominantClusterByDetection =
-                FindDominantClustersByDetection(corePoints, labels);
-            BuildDominantCoreClusters(
+            labels = RunDbscan(
                 corePoints,
-                labels,
-                rawClusterCount,
-                dominantClusterByDetection,
-                out coreClusters,
-                out retainedCorePoints,
-                out suppressedClusterCount);
-            boundaryClusters = AssignBoundaryPoints(
-                boundaryPoints,
-                corePoints,
-                labels,
-                retainedCorePoints,
-                coreClusters,
-                dominantClusterByDetection,
-                options.BoundaryAssignmentDistanceMeters,
-                out assignedBoundaryHitCount);
-            clusteringMethod = "dbscan_core_hits_dominant_detection_cluster";
+                options.DbscanEpsilonMeters,
+                options.DbscanMinimumPoints,
+                out rawClusterCount,
+                out noiseHitCount);
+            if (rawClusterCount == 0)
+            {
+                return Fail(
+                    "DBSCAN did not find any core cluster. Reduce DBSCAN minimum points or " +
+                    "increase epsilon.",
+                    out error);
+            }
+            if (options.ClusterAssociationMode ==
+                SurfaceHitClusterAssociationMode.AggregateClassMask)
+            {
+                BuildAllCoreClusters(
+                    corePoints,
+                    labels,
+                    rawClusterCount,
+                    out coreClusters,
+                    out retainedCorePoints);
+                suppressedClusterCount = 0;
+                boundaryClusters = AssignBoundaryPointsToNearestCluster(
+                    boundaryPoints,
+                    corePoints,
+                    labels,
+                    retainedCorePoints,
+                    coreClusters,
+                    options.BoundaryAssignmentDistanceMeters,
+                    out assignedBoundaryHitCount);
+                clusteringMethod = "dbscan_all_class_hits_nearest_boundary_cluster";
+            }
+            else if (options.ClusterAssociationMode ==
+                     SurfaceHitClusterAssociationMode.DominantClusterPerDetection)
+            {
+                Dictionary<string, int> dominantClusterByDetection =
+                    FindDominantClustersByDetection(corePoints, labels);
+                BuildDominantCoreClusters(
+                    corePoints,
+                    labels,
+                    rawClusterCount,
+                    dominantClusterByDetection,
+                    out coreClusters,
+                    out retainedCorePoints,
+                    out suppressedClusterCount);
+                boundaryClusters = AssignBoundaryPoints(
+                    boundaryPoints,
+                    corePoints,
+                    labels,
+                    retainedCorePoints,
+                    coreClusters,
+                    dominantClusterByDetection,
+                    options.BoundaryAssignmentDistanceMeters,
+                    out assignedBoundaryHitCount);
+                clusteringMethod = "dbscan_core_hits_dominant_detection_cluster";
+            }
+            else
+            {
+                return Fail(
+                    $"Unsupported cluster association mode: {options.ClusterAssociationMode}.",
+                    out error);
+            }
         }
 
         var features = new JArray();
@@ -228,6 +293,7 @@ public static class SurfaceHitPolygonExporter
                     metricReference,
                     options,
                     clusteringMethod,
+                    consensusStats != null ? consensusStats[rawClusterIndex] : null,
                     conflict,
                     out JObject feature))
             {
@@ -246,6 +312,20 @@ public static class SurfaceHitPolygonExporter
             ["polygon_method"] = "original_mask_boundary_metric_occupancy_contour",
             ["dbscan_epsilon_m"] = options.DbscanEpsilonMeters,
             ["dbscan_minimum_points"] = options.DbscanMinimumPoints,
+            ["consensus_grid_cell_size_m"] = options.ConsensusGridCellSizeMeters,
+            ["consensus_overlap_tolerance_m"] = options.ConsensusOverlapToleranceMeters,
+            ["consensus_minimum_supporting_views"] =
+                options.ConsensusMinimumSupportingViews,
+            ["consensus_single_view_expansion_distance_m"] =
+                options.ConsensusSingleViewExpansionDistanceMeters,
+            ["consensus_available_view_count"] = consensusAvailableViewCount,
+            ["consensus_confirmed_cell_count"] = consensusConfirmedCellCount,
+            ["consensus_expanded_core_hit_count"] = consensusExpandedCoreHitCount,
+            ["consensus_unassigned_core_hit_count"] =
+                options.ClusterAssociationMode ==
+                SurfaceHitClusterAssociationMode.MultiViewConsensus
+                    ? noiseHitCount
+                    : 0,
             ["boundary_assignment_distance_m"] = options.BoundaryAssignmentDistanceMeters,
             ["grid_cell_size_m"] = options.GridCellSizeMeters,
             ["hit_radius_m"] = options.HitRadiusMeters,
@@ -265,10 +345,16 @@ public static class SurfaceHitPolygonExporter
             ["boundary_hit_count"] = boundaryPoints.Count,
             ["assigned_boundary_hit_count"] = assignedBoundaryHitCount,
             ["failed_georeference_hit_count"] = failedGeoreferenceCount,
-            ["raw_dbscan_cluster_count"] = rawClusterCount,
+            ["raw_dbscan_cluster_count"] =
+                options.ClusterAssociationMode ==
+                SurfaceHitClusterAssociationMode.MultiViewConsensus
+                    ? 0
+                    : rawClusterCount,
+            ["raw_cluster_count"] = rawClusterCount,
             ["active_cluster_count"] = activeClusterCount,
             ["suppressed_secondary_cluster_count"] = suppressedClusterCount,
             ["noise_core_hit_count"] = noiseHitCount,
+            ["unassigned_core_hit_count"] = noiseHitCount,
             ["exported_polygon_count"] = features.Count,
             ["omitted_cluster_count"] = omittedCount
         };
@@ -295,6 +381,9 @@ public static class SurfaceHitPolygonExporter
             suppressedClusterCount,
             semanticConflictPoints.Count,
             rejectedSemanticConflicts.Count,
+            consensusAvailableViewCount,
+            consensusConfirmedCellCount,
+            consensusExpandedCoreHitCount,
             features.Count,
             omittedCount);
         return true;
@@ -328,6 +417,18 @@ public static class SurfaceHitPolygonExporter
             return Fail("Polygon hit radius must be greater than zero metres.", out error);
         if (options.SimplificationToleranceMeters < 0f)
             return Fail("Polygon simplification tolerance cannot be negative.", out error);
+        if (options.ConsensusGridCellSizeMeters <= 0f)
+            return Fail("Consensus grid cell size must be greater than zero metres.", out error);
+        if (options.ConsensusOverlapToleranceMeters < 0f)
+            return Fail("Consensus overlap tolerance cannot be negative.", out error);
+        if (options.ConsensusMinimumSupportingViews < 2)
+            return Fail("Consensus minimum supporting views must be at least two.", out error);
+        if (options.ConsensusSingleViewExpansionDistanceMeters < 0f)
+        {
+            return Fail(
+                "Consensus single-view expansion distance cannot be negative.",
+                out error);
+        }
         if (options.SemanticConflictDistanceMeters <= 0f)
             return Fail("Semantic conflict distance must be greater than zero metres.", out error);
         if (options.SemanticConflictRatioThreshold < 0f ||
@@ -627,6 +728,246 @@ public static class SurfaceHitPolygonExporter
         }
     }
 
+    private static void BuildMultiViewConsensusClusters(
+        List<ClusterPoint> corePoints,
+        Options options,
+        out List<List<ClusterPoint>> clusters,
+        out int[] labels,
+        out bool[] retainedPoints,
+        out List<ClusterConsensusStats> clusterStats,
+        out int availableViewCount,
+        out int confirmedCellCount,
+        out int expandedCoreHitCount,
+        out int unassignedCoreHitCount)
+    {
+        double cellSize = options.ConsensusGridCellSizeMeters;
+        var pointIndicesByCell = new Dictionary<GridKey, List<int>>();
+        var occupiedCellsByView = new Dictionary<int, HashSet<GridKey>>();
+        for (int pointIndex = 0; pointIndex < corePoints.Count; pointIndex++)
+        {
+            ClusterPoint point = corePoints[pointIndex];
+            GridKey cell = GridKey.FromPoint(point, cellSize);
+            if (!pointIndicesByCell.TryGetValue(cell, out List<int> pointIndices))
+            {
+                pointIndices = new List<int>();
+                pointIndicesByCell.Add(cell, pointIndices);
+            }
+            pointIndices.Add(pointIndex);
+
+            int viewIndex = point.Hit.ViewIndex;
+            if (!occupiedCellsByView.TryGetValue(viewIndex, out HashSet<GridKey> viewCells))
+            {
+                viewCells = new HashSet<GridKey>();
+                occupiedCellsByView.Add(viewIndex, viewCells);
+            }
+            viewCells.Add(cell);
+        }
+        availableViewCount = occupiedCellsByView.Count;
+
+        int overlapRadiusCells = (int)Math.Ceiling(
+            options.ConsensusOverlapToleranceMeters / cellSize);
+        double overlapSquared = options.ConsensusOverlapToleranceMeters *
+                                options.ConsensusOverlapToleranceMeters;
+        var supportViewsByCell = new Dictionary<GridKey, HashSet<int>>();
+        foreach (GridKey candidateCell in pointIndicesByCell.Keys)
+        {
+            var supportingViews = new HashSet<int>();
+            foreach (KeyValuePair<int, HashSet<GridKey>> view in occupiedCellsByView)
+            {
+                bool supportsCell = false;
+                for (int xOffset = -overlapRadiusCells;
+                     xOffset <= overlapRadiusCells && !supportsCell;
+                     xOffset++)
+                {
+                    for (int yOffset = -overlapRadiusCells;
+                         yOffset <= overlapRadiusCells;
+                         yOffset++)
+                    {
+                        double eastOffset = xOffset * cellSize;
+                        double northOffset = yOffset * cellSize;
+                        if (eastOffset * eastOffset + northOffset * northOffset > overlapSquared)
+                            continue;
+                        if (!view.Value.Contains(new GridKey(
+                                candidateCell.X + xOffset,
+                                candidateCell.Y + yOffset)))
+                        {
+                            continue;
+                        }
+                        supportsCell = true;
+                        break;
+                    }
+                }
+                if (supportsCell)
+                    supportingViews.Add(view.Key);
+            }
+            if (supportingViews.Count >= options.ConsensusMinimumSupportingViews)
+                supportViewsByCell.Add(candidateCell, supportingViews);
+        }
+        confirmedCellCount = supportViewsByCell.Count;
+
+        var orderedConfirmedCells = new List<GridKey>(supportViewsByCell.Keys);
+        orderedConfirmedCells.Sort(CompareGridKeys);
+        var clusterByConfirmedCell = new Dictionary<GridKey, int>();
+        clusters = new List<List<ClusterPoint>>();
+        clusterStats = new List<ClusterConsensusStats>();
+        double connectionDistance = Math.Max(
+            options.ConsensusOverlapToleranceMeters,
+            cellSize * Math.Sqrt(2.0));
+        double connectionSquared = connectionDistance * connectionDistance;
+        int connectionRadiusCells = Math.Max(
+            1,
+            (int)Math.Ceiling(connectionDistance / cellSize));
+        for (int seedIndex = 0; seedIndex < orderedConfirmedCells.Count; seedIndex++)
+        {
+            GridKey seed = orderedConfirmedCells[seedIndex];
+            if (clusterByConfirmedCell.ContainsKey(seed))
+                continue;
+
+            int clusterIndex = clusters.Count;
+            clusters.Add(new List<ClusterPoint>());
+            var stats = new ClusterConsensusStats();
+            clusterStats.Add(stats);
+            var queue = new Queue<GridKey>();
+            clusterByConfirmedCell.Add(seed, clusterIndex);
+            queue.Enqueue(seed);
+            while (queue.Count > 0)
+            {
+                GridKey cell = queue.Dequeue();
+                stats.ConfirmedCellCount++;
+                HashSet<int> supportingViews = supportViewsByCell[cell];
+                stats.MaximumViewSupport = Math.Max(
+                    stats.MaximumViewSupport, supportingViews.Count);
+                stats.SupportingViews.UnionWith(supportingViews);
+
+                for (int xOffset = -connectionRadiusCells;
+                     xOffset <= connectionRadiusCells;
+                     xOffset++)
+                {
+                    for (int yOffset = -connectionRadiusCells;
+                         yOffset <= connectionRadiusCells;
+                         yOffset++)
+                    {
+                        if (xOffset == 0 && yOffset == 0)
+                            continue;
+                        double eastOffset = xOffset * cellSize;
+                        double northOffset = yOffset * cellSize;
+                        if (eastOffset * eastOffset + northOffset * northOffset >
+                            connectionSquared)
+                        {
+                            continue;
+                        }
+                        var neighbour = new GridKey(
+                            cell.X + xOffset,
+                            cell.Y + yOffset);
+                        if (!supportViewsByCell.ContainsKey(neighbour) ||
+                            clusterByConfirmedCell.ContainsKey(neighbour))
+                        {
+                            continue;
+                        }
+                        clusterByConfirmedCell.Add(neighbour, clusterIndex);
+                        queue.Enqueue(neighbour);
+                    }
+                }
+            }
+        }
+
+        labels = new int[corePoints.Count];
+        retainedPoints = new bool[corePoints.Count];
+        for (int i = 0; i < labels.Length; i++)
+            labels[i] = Noise;
+
+        expandedCoreHitCount = 0;
+        double expansionDistance = options.ConsensusSingleViewExpansionDistanceMeters;
+        double expansionSquared = expansionDistance * expansionDistance;
+        int expansionRadiusCells = (int)Math.Ceiling(expansionDistance / cellSize);
+        for (int pointIndex = 0; pointIndex < corePoints.Count; pointIndex++)
+        {
+            ClusterPoint point = corePoints[pointIndex];
+            GridKey pointCell = GridKey.FromPoint(point, cellSize);
+            bool isConfirmedCell = clusterByConfirmedCell.TryGetValue(
+                pointCell, out int targetCluster);
+            if (!isConfirmedCell)
+            {
+                targetCluster = -1;
+                if (expansionDistance > 0.0)
+                {
+                    targetCluster = FindNearestConsensusCluster(
+                        point,
+                        pointCell,
+                        clusterByConfirmedCell,
+                        cellSize,
+                        expansionRadiusCells,
+                        expansionSquared);
+                }
+            }
+            if (targetCluster < 0)
+                continue;
+
+            labels[pointIndex] = targetCluster;
+            retainedPoints[pointIndex] = true;
+            clusters[targetCluster].Add(point);
+            if (!isConfirmedCell)
+            {
+                clusterStats[targetCluster].ExpandedCoreHitCount++;
+                expandedCoreHitCount++;
+            }
+        }
+
+        unassignedCoreHitCount = 0;
+        for (int i = 0; i < retainedPoints.Length; i++)
+        {
+            if (!retainedPoints[i])
+                unassignedCoreHitCount++;
+        }
+    }
+
+    private static int FindNearestConsensusCluster(
+        ClusterPoint point,
+        GridKey pointCell,
+        Dictionary<GridKey, int> clusterByConfirmedCell,
+        double cellSize,
+        int searchRadiusCells,
+        double maximumSquaredDistance)
+    {
+        int nearestCluster = -1;
+        double nearestSquaredDistance = double.PositiveInfinity;
+        for (int xOffset = -searchRadiusCells; xOffset <= searchRadiusCells; xOffset++)
+        {
+            for (int yOffset = -searchRadiusCells; yOffset <= searchRadiusCells; yOffset++)
+            {
+                var cell = new GridKey(pointCell.X + xOffset, pointCell.Y + yOffset);
+                if (!clusterByConfirmedCell.TryGetValue(cell, out int clusterIndex))
+                    continue;
+                double cellEast = (cell.X + 0.5) * cellSize;
+                double cellNorth = (cell.Y + 0.5) * cellSize;
+                double squaredDistance = SquaredDistance(
+                    point.EastMeters,
+                    point.NorthMeters,
+                    cellEast,
+                    cellNorth);
+                if (squaredDistance > maximumSquaredDistance ||
+                    squaredDistance > nearestSquaredDistance)
+                {
+                    continue;
+                }
+                if (squaredDistance == nearestSquaredDistance &&
+                    nearestCluster >= 0 && clusterIndex >= nearestCluster)
+                {
+                    continue;
+                }
+                nearestSquaredDistance = squaredDistance;
+                nearestCluster = clusterIndex;
+            }
+        }
+        return nearestCluster;
+    }
+
+    private static int CompareGridKeys(GridKey left, GridKey right)
+    {
+        int xComparison = left.X.CompareTo(right.X);
+        return xComparison != 0 ? xComparison : left.Y.CompareTo(right.Y);
+    }
+
     private static List<List<ClusterPoint>> AssignBoundaryPoints(
         List<ClusterPoint> boundaryPoints,
         List<ClusterPoint> corePoints,
@@ -919,6 +1260,7 @@ public static class SurfaceHitPolygonExporter
         MetricReference metricReference,
         Options options,
         string clusteringMethod,
+        ClusterConsensusStats consensus,
         SemanticConflictAssessment conflict,
         out JObject feature)
     {
@@ -956,8 +1298,8 @@ public static class SurfaceHitPolygonExporter
         feature = new JObject
         {
             ["type"] = "Feature",
-            ["id"] = options.ClusterAssociationMode ==
-                     SurfaceHitClusterAssociationMode.AggregateClassMask
+            ["id"] = options.ClusterAssociationMode !=
+                     SurfaceHitClusterAssociationMode.DominantClusterPerDetection
                 ? $"{SanitizeId(options.ClassFilter)}_cluster_{rawClusterIndex:D3}"
                 : $"{SanitizeId(options.ClassFilter)}_{featureIndex:D3}",
             ["properties"] = new JObject
@@ -970,7 +1312,20 @@ public static class SurfaceHitPolygonExporter
                 ["polygon_method"] = usedOccupancyContour
                     ? "original_mask_boundary_metric_occupancy_contour"
                     : "convex_hull_fallback",
-                ["raw_dbscan_cluster_index"] = rawClusterIndex,
+                ["raw_cluster_index"] = rawClusterIndex,
+                ["raw_dbscan_cluster_index"] = options.ClusterAssociationMode ==
+                                                SurfaceHitClusterAssociationMode.MultiViewConsensus
+                    ? -1
+                    : rawClusterIndex,
+                ["consensus_status"] = consensus != null
+                    ? "confirmed"
+                    : "not_applicable",
+                ["consensus_supporting_views"] = consensus != null
+                    ? SortedIntegerArray(consensus.SupportingViews)
+                    : new JArray(),
+                ["consensus_maximum_view_support"] = consensus?.MaximumViewSupport ?? 0,
+                ["consensus_confirmed_cell_count"] = consensus?.ConfirmedCellCount ?? 0,
+                ["consensus_expanded_core_hit_count"] = consensus?.ExpandedCoreHitCount ?? 0,
                 ["detection_ids"] = new JArray(sortedDetectionIds),
                 ["view_indices"] = new JArray(sortedViews),
                 ["core_hit_count"] = coreCluster.Count,
@@ -1658,6 +2013,14 @@ public static class SurfaceHitPolygonExporter
             Hit = hit;
             Geo = new GeoPoint(longitude, latitude);
         }
+    }
+
+    private sealed class ClusterConsensusStats
+    {
+        public readonly HashSet<int> SupportingViews = new HashSet<int>();
+        public int ConfirmedCellCount;
+        public int MaximumViewSupport;
+        public int ExpandedCoreHitCount;
     }
 
     private readonly struct SemanticConflictAssessment

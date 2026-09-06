@@ -55,14 +55,14 @@ class-specific geometry assumptions.
 
 Use the four original FSS-SAM3 files directly. Set **Batch Mask Directory** to their folder, enable
 **Discover Aggregate Class Masks**, set **Aggregate Mask Class Name** to `building`, and choose
-**Aggregate Class Mask** under **Polygon Cluster Association Mode**. In this mode every valid
-DBSCAN cluster is retained and original-boundary hits are assigned to the nearest cluster, even
-when several buildings came from one semantic mask.
+**Multi View Consensus** under **Polygon Cluster Association Mode**. This mode confirms a spatial
+cell only when nearby projected building hits come from at least two distinct views. Connected
+confirmed cells seed one building cluster, and nearby single-view hits recover its observed edge.
+Use **Aggregate Class Mask** only as a diagnostic mode that retains every DBSCAN cluster.
 
 The earlier connected-component splitter remains available for models whose output already has
-well-separated instances. It is not required for aggregate mode. Run it with:
-
-From the repository root, split all four combined masks with:
+well-separated instances. It is not required for aggregate or consensus mode. From the repository
+root, split all four combined masks with:
 
 ```powershell
 py tools\split_semantic_mask_components.py `
@@ -117,24 +117,30 @@ The exporter then:
 
 1. selects hits whose class matches **Polygon Class Filter** and converts them to a local
    east/north plane measured in metres;
-2. applies DBSCAN only to core hits;
-3. either retains the dominant cluster of every instance mask or, in **Aggregate Class Mask**
-   mode, retains every DBSCAN cluster;
-4. assigns original-mask boundary hits to the dominant same-detection cluster in instance mode,
-   or to the nearest cluster in aggregate mode, within **Boundary Assignment Distance Meters**; and
+2. either applies DBSCAN or builds a metric occupancy grid carrying the distinct view IDs that
+   support each cell;
+3. in **Multi View Consensus** mode, keeps cells supported by the configured number of views,
+   connects neighbouring confirmed cells, and attaches nearby single-view core hits;
+4. assigns original-mask boundary hits to the relevant same-detection cluster in dominant mode,
+   or to the nearest retained cluster in aggregate and consensus modes; and
 5. splats accepted hits into a metric occupancy grid, traces its largest exterior ring, and
    simplifies the contour before converting it to WGS84.
 
 The timestamped `clustered_building_polygons_*.geojson` is written to the same output directory
 as the CSV report. Every feature records its source detection IDs, view indices, core and assigned
-boundary hit counts, occupied-cell count, and final polygon vertex count. A convex hull is used
-only as a fallback when a valid grid contour cannot be traced.
+boundary hit counts, occupied-cell count, and final polygon vertex count. Consensus features also
+record their supporting views, maximum view support, confirmed-cell count, and the number of
+single-view core hits used only for boundary expansion. A convex hull is used only as a fallback
+when a valid grid contour cannot be traced.
 
 The default settings are deliberately provisional:
 
 - **Polygon Class Filter:** `building`
-- **Polygon Cluster Association Mode:** `Dominant Cluster Per Detection` for instance masks;
-  switch to `Aggregate Class Mask` for combined semantic masks
+- **Polygon Cluster Association Mode:** `Multi View Consensus` for multi-view semantic masks
+- **Consensus Grid Cell Size Meters:** `0.5`
+- **Consensus Overlap Tolerance Meters:** `1.25`
+- **Consensus Minimum Supporting Views:** `2`
+- **Consensus Single View Expansion Distance Meters:** `1.5`
 - **Dbscan Epsilon Meters:** `2`
 - **Dbscan Minimum Points:** `5`
 - **Boundary Assignment Distance Meters:** `4`
@@ -147,6 +153,11 @@ The default settings are deliberately provisional:
 polygon. Reduce **Polygon Hit Radius Meters** when contours are too inflated; increase it slightly
 when one contour contains many narrow gaps. Smaller grid cells retain more detail at higher cost,
 while the simplification tolerance controls how angular the final GeoJSON ring remains.
+
+In consensus mode a single-view hit cannot seed a polygon. It can only expand a nearby cluster
+that already contains the required multi-view support. **Consensus Overlap Tolerance Meters**
+absorbs small camera/collider alignment errors; lowering it separates nearby structures, while
+raising it confirms more sparse or slightly misaligned evidence.
 
 Clusters with fewer than three valid contour positions are reported as omitted. Raw core and
 boundary hits remain unchanged. A semantically wrong but geometrically dense building mask is

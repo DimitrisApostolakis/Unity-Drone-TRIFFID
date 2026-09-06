@@ -153,9 +153,21 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [Header("Provisional Polygon Export")]
     [SerializeField] private string polygonClassFilter = "building";
     [Tooltip("Dominant mode expects one instance per mask. Aggregate mode retains every DBSCAN " +
-             "cluster and assigns boundaries to the nearest cluster.")]
+             "cluster. Multi-view consensus requires overlapping class evidence from distinct views.")]
     [SerializeField] private SurfaceHitClusterAssociationMode polygonClusterAssociationMode =
         SurfaceHitClusterAssociationMode.DominantClusterPerDetection;
+
+    [Header("Multi-View Consensus Clustering")]
+    [Tooltip("Metric cell size used to compare projected masks from different views.")]
+    [Min(0.05f)] [SerializeField] private float consensusGridCellSizeMeters = 0.5f;
+    [Tooltip("Maximum horizontal offset for two views to support the same consensus cell.")]
+    [Min(0f)] [SerializeField] private float consensusOverlapToleranceMeters = 1.25f;
+    [Tooltip("Distinct views required before a cell can seed a building polygon.")]
+    [Min(2)] [SerializeField] private int consensusMinimumSupportingViews = 2;
+    [Tooltip("Attach nearby single-view core hits to a confirmed multi-view building core.")]
+    [Min(0f)] [SerializeField] private float consensusSingleViewExpansionDistanceMeters = 1.5f;
+
+    [Header("DBSCAN Cluster Modes")]
     [Tooltip("Maximum horizontal distance in metres between neighbouring DBSCAN hits.")]
     [Min(0.01f)] [SerializeField] private float dbscanEpsilonMeters = 2f;
     [Tooltip("Minimum number of neighbouring hits needed to form a dense DBSCAN region.")]
@@ -605,6 +617,11 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             HitRadiusMeters = polygonHitRadiusMeters,
             SimplificationToleranceMeters = polygonSimplificationMeters,
             ClusterAssociationMode = polygonClusterAssociationMode,
+            ConsensusGridCellSizeMeters = consensusGridCellSizeMeters,
+            ConsensusOverlapToleranceMeters = consensusOverlapToleranceMeters,
+            ConsensusMinimumSupportingViews = consensusMinimumSupportingViews,
+            ConsensusSingleViewExpansionDistanceMeters =
+                consensusSingleViewExpansionDistanceMeters,
             ExcludeSemanticConflicts = excludeSemanticConflicts,
             SemanticConflictClassFilters = semanticConflictClassFilters,
             SemanticConflictDistanceMeters = semanticConflictDistanceMeters,
@@ -624,10 +641,29 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         }
 
         lastPolygonOutputPath = outputPath;
-        string clusterDescription = polygonClusterAssociationMode ==
-                                    SurfaceHitClusterAssociationMode.AggregateClassMask
-            ? "aggregate"
-            : "dominant";
+        string clusterDescription;
+        string omittedDescription;
+        switch (polygonClusterAssociationMode)
+        {
+            case SurfaceHitClusterAssociationMode.AggregateClassMask:
+                clusterDescription = "aggregate DBSCAN";
+                omittedDescription = "DBSCAN noise";
+                break;
+            case SurfaceHitClusterAssociationMode.MultiViewConsensus:
+                clusterDescription = "multi-view consensus";
+                omittedDescription = "unconfirmed";
+                break;
+            default:
+                clusterDescription = "dominant DBSCAN";
+                omittedDescription = "DBSCAN noise";
+                break;
+        }
+        string consensusDescription = polygonClusterAssociationMode ==
+                                      SurfaceHitClusterAssociationMode.MultiViewConsensus
+            ? $" Consensus confirmed {summary.ConsensusConfirmedCellCount} cell(s) across " +
+              $"{summary.ConsensusAvailableViewCount} available view(s) and attached " +
+              $"{summary.ConsensusExpandedCoreHitCount} nearby single-view core hit(s)."
+            : string.Empty;
         Debug.Log(
             $"[MaskRaycastProjector] Exported {summary.ExportedPolygonCount} provisional " +
             $"polygon(s) from {summary.ClusterCount} {clusterDescription} " +
@@ -637,8 +673,9 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             $"boundary hit(s), suppressed {summary.SuppressedClusterCount} secondary " +
             $"cluster(s), rejected {summary.RejectedSemanticConflictCount} semantic " +
             $"conflict(s) using {summary.SemanticConflictSourceHitCount} contradictory " +
-            $"core hit(s), and omitted {summary.NoiseHitCount} DBSCAN noise core hit(s) plus " +
-            $"{summary.OmittedClusterCount} invalid contour(s).",
+            $"core hit(s), and omitted {summary.NoiseHitCount} {omittedDescription} core " +
+            $"hit(s) plus " +
+            $"{summary.OmittedClusterCount} invalid contour(s).{consensusDescription}",
             this);
     }
 
