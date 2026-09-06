@@ -51,8 +51,12 @@ public sealed class MaskProjectionStats
     public int MaskHeight { get; }
     public int ForegroundPixels { get; }
     public int ErodedForegroundPixels { get; }
-    public int Samples { get; }
-    public int Hits { get; }
+    public int CoreSamples { get; }
+    public int CoreHits { get; }
+    public int BoundarySamples { get; }
+    public int BoundaryHits { get; }
+    public int Samples => CoreSamples + BoundarySamples;
+    public int Hits => CoreHits + BoundaryHits;
     public int Misses => Samples - Hits;
     public float HitRate => Samples > 0 ? (float)Hits / Samples : 0f;
     public int UniqueColliders { get; }
@@ -69,8 +73,10 @@ public sealed class MaskProjectionStats
         int maskHeight,
         int foregroundPixels,
         int erodedForegroundPixels,
-        int samples,
-        int hits,
+        int coreSamples,
+        int coreHits,
+        int boundarySamples,
+        int boundaryHits,
         int uniqueColliders,
         int uniqueTriangles,
         float minimumHitDistance,
@@ -87,8 +93,10 @@ public sealed class MaskProjectionStats
         MaskHeight = maskHeight;
         ForegroundPixels = foregroundPixels;
         ErodedForegroundPixels = erodedForegroundPixels;
-        Samples = samples;
-        Hits = hits;
+        CoreSamples = coreSamples;
+        CoreHits = coreHits;
+        BoundarySamples = boundarySamples;
+        BoundaryHits = boundaryHits;
         UniqueColliders = uniqueColliders;
         UniqueTriangles = uniqueTriangles;
         MinimumHitDistance = minimumHitDistance;
@@ -141,6 +149,14 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [Min(0.01f)] [SerializeField] private float dbscanEpsilonMeters = 2f;
     [Tooltip("Minimum number of neighbouring hits needed to form a dense DBSCAN region.")]
     [Min(3)] [SerializeField] private int dbscanMinimumPoints = 5;
+    [Tooltip("Maximum distance in metres for assigning an original-mask boundary hit to a core cluster.")]
+    [Min(0.01f)] [SerializeField] private float boundaryAssignmentDistanceMeters = 4f;
+    [Tooltip("Metric grid cell size used to trace the polygon boundary.")]
+    [Min(0.05f)] [SerializeField] private float polygonGridCellSizeMeters = 0.5f;
+    [Tooltip("Radius around each accepted hit used to fill the polygon occupancy grid.")]
+    [Min(0.05f)] [SerializeField] private float polygonHitRadiusMeters = 0.75f;
+    [Tooltip("Tolerance in metres used to simplify the extracted grid contour.")]
+    [Min(0f)] [SerializeField] private float polygonSimplificationMeters = 0.5f;
 
     [Header("Source Video Dimensions")]
     [Tooltip("Use zero to infer the width from each mask. Set this when masks were resized.")]
@@ -153,6 +169,8 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [Range(0, 16)] [SerializeField] private int erosionRadiusPixels = 3;
     [Min(1)] [SerializeField] private int boundaryStridePixels = 8;
     [Min(1)] [SerializeField] private int interiorStridePixels = 16;
+    [Tooltip("Sampling stride for the original, non-eroded mask contour used by polygon export.")]
+    [Min(1)] [SerializeField] private int polygonBoundaryStridePixels = 4;
 
     [Header("Debug Visualization")]
     [SerializeField] private bool drawHitGizmos = true;
@@ -437,6 +455,7 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         csv.AppendLine(
             "mask_path,view_index,frame_index,local_detection_id,class_name," +
             "mask_width,mask_height,foreground_pixels,eroded_foreground_pixels," +
+            "core_samples,core_hits,boundary_samples,boundary_hits," +
             "samples,hits,misses,hit_rate,unique_colliders,unique_triangles," +
             "min_hit_distance,median_hit_distance,mean_hit_distance,max_hit_distance");
         for (int i = 0; i < projectionStats.Count; i++)
@@ -451,6 +470,10 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                 .Append(stats.MaskHeight).Append(',')
                 .Append(stats.ForegroundPixels).Append(',')
                 .Append(stats.ErodedForegroundPixels).Append(',')
+                .Append(stats.CoreSamples).Append(',')
+                .Append(stats.CoreHits).Append(',')
+                .Append(stats.BoundarySamples).Append(',')
+                .Append(stats.BoundaryHits).Append(',')
                 .Append(stats.Samples).Append(',')
                 .Append(stats.Hits).Append(',')
                 .Append(stats.Misses).Append(',')
@@ -513,7 +536,11 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         {
             ClassFilter = polygonClassFilter,
             DbscanEpsilonMeters = dbscanEpsilonMeters,
-            DbscanMinimumPoints = dbscanMinimumPoints
+            DbscanMinimumPoints = dbscanMinimumPoints,
+            BoundaryAssignmentDistanceMeters = boundaryAssignmentDistanceMeters,
+            GridCellSizeMeters = polygonGridCellSizeMeters,
+            HitRadiusMeters = polygonHitRadiusMeters,
+            SimplificationToleranceMeters = polygonSimplificationMeters
         };
         if (!SurfaceHitPolygonExporter.TryExport(
                 surfaceHits,
@@ -530,11 +557,12 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         lastPolygonOutputPath = outputPath;
         Debug.Log(
             $"[MaskRaycastProjector] Exported {summary.ExportedPolygonCount} provisional " +
-            $"polygon(s) from {summary.GeoreferencedHitCount} georeferenced " +
-            $"'{polygonClassFilter}' hit(s) in {summary.ClusterCount} DBSCAN cluster(s) to " +
-            $"'{lastPolygonOutputPath}'. Omitted {summary.NoiseHitCount} noise hit(s) and " +
-            $"{summary.OmittedClusterCount} cluster(s) with fewer than three distinct " +
-            "WGS84 points.",
+            $"polygon(s) from {summary.ClusterCount} dominant '{polygonClassFilter}' " +
+            $"cluster(s) to '{lastPolygonOutputPath}'. Assigned " +
+            $"{summary.AssignedBoundaryHitCount}/{summary.BoundaryHitCount} original-mask " +
+            $"boundary hit(s), suppressed {summary.SuppressedClusterCount} secondary " +
+            $"cluster(s), and omitted {summary.NoiseHitCount} DBSCAN noise core hit(s) plus " +
+            $"{summary.OmittedClusterCount} invalid contour(s).",
             this);
     }
 
@@ -606,6 +634,8 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             return Fail("Set both source frame dimensions, or leave both at zero.", out error);
         if (boundaryStridePixels < 1 || interiorStridePixels < 1)
             return Fail("Boundary and interior strides must be at least one pixel.", out error);
+        if (polygonBoundaryStridePixels < 1)
+            return Fail("Polygon boundary stride must be at least one pixel.", out error);
         if (erosionRadiusPixels < 0)
             return Fail("Erosion radius cannot be negative.", out error);
         if (float.IsNaN(foregroundThreshold) || float.IsInfinity(foregroundThreshold) ||
@@ -706,60 +736,45 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                 eroded = foreground;
                 erodedForegroundCount = foregroundCount;
             }
-            List<int> sampleIndices = CollectSampleIndices(
+            List<int> coreSampleIndices = CollectSampleIndices(
                 eroded,
                 maskTexture.width,
                 maskTexture.height,
                 boundaryStridePixels,
                 interiorStridePixels);
+            List<int> polygonBoundaryIndices = CollectBoundarySampleIndices(
+                foreground,
+                maskTexture.width,
+                maskTexture.height,
+                polygonBoundaryStridePixels);
 
-            int initialHitCount = output.Count;
             var uniqueColliders = new HashSet<int>();
             var uniqueTriangles = new HashSet<long>();
             var hitDistances = new List<float>();
-            for (int i = 0; i < sampleIndices.Count; i++)
-            {
-                int index = sampleIndices[i];
-                int textureX = index % maskTexture.width;
-                int textureY = index / maskTexture.width;
-                // GetPixels32 and viewport coordinates both start at the bottom-left, so the
-                // sampled texture Y maps directly to viewport Y without an image-space flip.
-                float viewportX = (textureX + 0.5f) / maskTexture.width;
-                float viewportY = (textureY + 0.5f) / maskTexture.height;
-                Ray ray = camera.ViewportPointToRay(new Vector3(viewportX, viewportY, 0f));
-                if (!player.TryRaycastMap(ray, out RaycastHit raycastHit))
-                    continue;
-
-                int colliderInstanceId = raycastHit.collider != null
-                    ? raycastHit.collider.GetInstanceID()
-                    : 0;
-                if (!colliderPaths.TryGetValue(colliderInstanceId, out string colliderPath))
-                {
-                    colliderPath = SurfaceHit.BuildColliderPath(raycastHit.collider);
-                    colliderPaths.Add(colliderInstanceId, colliderPath);
-                }
-
-                uniqueColliders.Add(colliderInstanceId);
-                if (raycastHit.triangleIndex >= 0)
-                {
-                    long triangleKey = ((long)colliderInstanceId << 32) ^
-                                       (uint)raycastHit.triangleIndex;
-                    uniqueTriangles.Add(triangleKey);
-                }
-                hitDistances.Add(raycastHit.distance);
-
-                output.Add(new SurfaceHit(
-                    raycastHit,
-                    ray,
-                    request.viewIndex,
-                    request.frameIndex,
-                    request.localDetectionId,
-                    request.className,
-                    Mathf.Clamp01(request.confidence),
-                    colliderPath));
-            }
-
-            int hitCount = output.Count - initialHitCount;
+            int coreHitCount = ProjectSampleSet(
+                coreSampleIndices,
+                maskTexture.width,
+                maskTexture.height,
+                camera,
+                request,
+                MaskSampleKind.Core,
+                output,
+                colliderPaths,
+                uniqueColliders,
+                uniqueTriangles,
+                hitDistances);
+            int boundaryHitCount = ProjectSampleSet(
+                polygonBoundaryIndices,
+                maskTexture.width,
+                maskTexture.height,
+                camera,
+                request,
+                MaskSampleKind.Boundary,
+                output,
+                colliderPaths,
+                uniqueColliders,
+                uniqueTriangles,
+                hitDistances);
             CalculateDistanceSummary(
                 hitDistances,
                 out float minimumHitDistance,
@@ -773,8 +788,10 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                 maskTexture.height,
                 foregroundCount,
                 erodedForegroundCount,
-                sampleIndices.Count,
-                hitCount,
+                coreSampleIndices.Count,
+                coreHitCount,
+                polygonBoundaryIndices.Count,
+                boundaryHitCount,
                 uniqueColliders.Count,
                 uniqueTriangles.Count,
                 minimumHitDistance,
@@ -783,8 +800,8 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                 maximumHitDistance);
             Debug.Log(
                 $"[MaskRaycastProjector] {request.localDetectionId}: " +
-                $"{sampleIndices.Count} sample(s), {hitCount} mesh hit(s), " +
-                $"{sampleIndices.Count - hitCount} miss(es).",
+                $"{coreHitCount}/{coreSampleIndices.Count} core hit(s), " +
+                $"{boundaryHitCount}/{polygonBoundaryIndices.Count} original-boundary hit(s).",
                 this);
             return true;
         }
@@ -802,6 +819,65 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                     DestroyImmediate(maskTexture);
             }
         }
+    }
+
+    private int ProjectSampleSet(
+        List<int> sampleIndices,
+        int maskWidth,
+        int maskHeight,
+        Camera camera,
+        MaskProjectionRequest request,
+        MaskSampleKind sampleKind,
+        List<SurfaceHit> output,
+        Dictionary<int, string> colliderPaths,
+        HashSet<int> uniqueColliders,
+        HashSet<long> uniqueTriangles,
+        List<float> hitDistances)
+    {
+        int hitCount = 0;
+        for (int i = 0; i < sampleIndices.Count; i++)
+        {
+            int index = sampleIndices[i];
+            int textureX = index % maskWidth;
+            int textureY = index / maskWidth;
+            // GetPixels32 and viewport coordinates both start at the bottom-left, so the
+            // sampled texture Y maps directly to viewport Y without an image-space flip.
+            float viewportX = (textureX + 0.5f) / maskWidth;
+            float viewportY = (textureY + 0.5f) / maskHeight;
+            Ray ray = camera.ViewportPointToRay(new Vector3(viewportX, viewportY, 0f));
+            if (!player.TryRaycastMap(ray, out RaycastHit raycastHit))
+                continue;
+
+            int colliderInstanceId = raycastHit.collider != null
+                ? raycastHit.collider.GetInstanceID()
+                : 0;
+            if (!colliderPaths.TryGetValue(colliderInstanceId, out string colliderPath))
+            {
+                colliderPath = SurfaceHit.BuildColliderPath(raycastHit.collider);
+                colliderPaths.Add(colliderInstanceId, colliderPath);
+            }
+
+            uniqueColliders.Add(colliderInstanceId);
+            if (raycastHit.triangleIndex >= 0)
+            {
+                long triangleKey = ((long)colliderInstanceId << 32) ^
+                                   (uint)raycastHit.triangleIndex;
+                uniqueTriangles.Add(triangleKey);
+            }
+            hitDistances.Add(raycastHit.distance);
+            output.Add(new SurfaceHit(
+                raycastHit,
+                ray,
+                request.viewIndex,
+                request.frameIndex,
+                request.localDetectionId,
+                request.className,
+                Mathf.Clamp01(request.confidence),
+                sampleKind,
+                colliderPath));
+            hitCount++;
+        }
+        return hitCount;
     }
 
     private static bool[] BuildForegroundMask(Color32[] pixels, float normalizedThreshold)
@@ -880,6 +956,41 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             }
         }
         return eroded;
+    }
+
+    private static List<int> CollectBoundarySampleIndices(
+        bool[] mask, int width, int height, int stride)
+    {
+        ValidateMaskDimensions(mask, width, height);
+        if (stride < 1)
+            throw new ArgumentOutOfRangeException(nameof(stride), "Stride must be at least one.");
+
+        int cellColumns = (width + stride - 1) / stride;
+        int cellRows = (height + stride - 1) / stride;
+        var cellSamples = new int[cellColumns * cellRows];
+        for (int i = 0; i < cellSamples.Length; i++)
+            cellSamples[i] = -1;
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int index = y * width + x;
+                if (!mask[index] || !IsBoundaryPixel(mask, width, height, x, y))
+                    continue;
+                int cell = (y / stride) * cellColumns + x / stride;
+                if (cellSamples[cell] < 0)
+                    cellSamples[cell] = index;
+            }
+        }
+
+        var samples = new List<int>();
+        for (int i = 0; i < cellSamples.Length; i++)
+        {
+            if (cellSamples[i] >= 0)
+                samples.Add(cellSamples[i]);
+        }
+        return samples;
     }
 
     private static List<int> CollectSampleIndices(

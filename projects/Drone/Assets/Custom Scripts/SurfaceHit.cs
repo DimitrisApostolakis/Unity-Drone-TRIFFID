@@ -2,6 +2,17 @@ using System;
 using UnityEngine;
 
 /// <summary>
+/// Identifies whether a raycast is reliable eroded-mask evidence or original-mask boundary
+/// evidence used to recover the observed polygon extent.
+/// </summary>
+[Serializable]
+public enum MaskSampleKind
+{
+    Core = 0,
+    Boundary = 1
+}
+
+/// <summary>
 /// Geometry and provenance retained for one semantic-mask raycast.
 /// TriangleIndex must be interpreted together with ColliderInstanceId (or ColliderPath),
 /// because triangle indices are local to a MeshCollider.
@@ -23,6 +34,7 @@ public struct SurfaceHit
     public string LocalDetectionId;
     public string ClassName;
     public float Confidence;
+    public MaskSampleKind SampleKind;
 
     public SurfaceHit(
         RaycastHit raycastHit,
@@ -32,6 +44,7 @@ public struct SurfaceHit
         string localDetectionId,
         string className,
         float confidence,
+        MaskSampleKind sampleKind = MaskSampleKind.Core,
         string colliderPath = null)
     {
         WorldPoint = raycastHit.point;
@@ -51,6 +64,7 @@ public struct SurfaceHit
         LocalDetectionId = localDetectionId ?? string.Empty;
         ClassName = className ?? string.Empty;
         Confidence = confidence;
+        SampleKind = sampleKind;
     }
 
     public static string BuildColliderPath(Collider collider)

@@ -48,7 +48,8 @@ class-specific geometry assumptions.
 After a successful projection, a timestamped `mask_projection_report_*.csv` file is written next
 to the masks. Set **Report Output Directory** to write it elsewhere. The report contains one row
 per mask with pixel counts, samples, hits, misses, hit rate, unique colliders, unique triangles,
-and hit-distance statistics.
+and hit-distance statistics. Core and original-boundary sample/hit totals are written separately
+so the two stages can be diagnosed independently.
 
 Disable **Export Csv After Projection** to prevent automatic export. The last in-memory report can
 still be written with **Export Last Projection Report CSV**.
@@ -64,28 +65,48 @@ still be written with **Export Last Projection Report CSV**.
 ## Provisional building polygons
 
 After projecting the complete batch, choose **Export One Polygon Per Class Cluster** from
-the component menu. The exporter does not create one polygon per mask. Instead, it:
+the component menu. Projection now retains two independent hit sets per mask:
 
-1. selects all raycast hits whose class matches **Polygon Class Filter**;
-2. converts their WGS84 positions to a local east/north plane measured in metres;
-3. applies DBSCAN to find spatially dense clusters without assuming locally consistent depth;
-4. treats isolated points as noise rather than allowing them to connect distant buildings; and
-5. joins the outer points of each cluster with one horizontal convex hull.
+- **core hits** sampled from the eroded mask, used only to find reliable object instances;
+- **boundary hits** sampled from the original non-eroded mask contour, used to recover the
+  observed outer extent.
+
+The exporter then:
+
+1. selects hits whose class matches **Polygon Class Filter** and converts them to a local
+   east/north plane measured in metres;
+2. applies DBSCAN only to core hits;
+3. retains the dominant core cluster of every connected mask component, suppressing small
+   satellite clusters caused by rays landing on unrelated surfaces;
+4. assigns original-mask boundary hits only to the dominant cluster of the same detection and
+   only when they are within **Boundary Assignment Distance Meters**; and
+5. splats accepted hits into a metric occupancy grid, traces its largest exterior ring, and
+   simplifies the contour before converting it to WGS84.
 
 The timestamped `clustered_building_polygons_*.geojson` is written to the same output directory
-as the CSV report. Every feature records its source detection IDs, view indices, cluster hit
-count, and hull vertex count. The collection metadata records the cluster and noise totals.
+as the CSV report. Every feature records its source detection IDs, view indices, core and assigned
+boundary hit counts, occupied-cell count, and final polygon vertex count. A convex hull is used
+only as a fallback when a valid grid contour cannot be traced.
 
 The default settings are deliberately provisional:
 
 - **Polygon Class Filter:** `building`
 - **Dbscan Epsilon Meters:** `2`
 - **Dbscan Minimum Points:** `5`
+- **Boundary Assignment Distance Meters:** `4`
+- **Polygon Grid Cell Size Meters:** `0.5`
+- **Polygon Hit Radius Meters:** `0.75`
+- **Polygon Simplification Meters:** `0.5`
+- **Polygon Boundary Stride Pixels:** `4`
 
-Clusters with fewer than three distinct WGS84 points cannot form a valid polygon and are reported
-as omitted. Raw hits remain unchanged. Reduce epsilon when nearby buildings merge; increase it
-when one building fragments into several clusters. DBSCAN can still join objects when a continuous
-chain of dense hits bridges them, so the exported polygons remain provisional.
+**Erosion Radius Pixels** affects core clustering but no longer shrinks the boundary used for the
+polygon. Reduce **Polygon Hit Radius Meters** when contours are too inflated; increase it slightly
+when one contour contains many narrow gaps. Smaller grid cells retain more detail at higher cost,
+while the simplification tolerance controls how angular the final GeoJSON ring remains.
+
+Clusters with fewer than three valid contour positions are reported as omitted. Raw core and
+boundary hits remain unchanged. A semantically wrong but geometrically dense building mask can
+still produce a polygon; the exporter deliberately does not reject objects by view count or area.
 
 Tree masks such as `green_trees_view00_component17.png` are discovered automatically as class
 `green_trees`. They are projected and included in the CSV and gizmos. With **Polygon Class Filter**

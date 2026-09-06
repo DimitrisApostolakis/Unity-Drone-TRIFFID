@@ -6,9 +6,9 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 /// <summary>
-/// Clusters georeferenced raycast hits in a local metric plane and creates one provisional
-/// WGS84 footprint from the outer points of each dense cluster. Raw SurfaceHits are never
-/// modified or discarded by this exporter.
+/// Uses reliable eroded-mask hits to find object instances, then assigns raycasts from the
+/// original mask boundary to those instances and traces one metric occupancy contour per cluster.
+/// Raw SurfaceHits are never modified or discarded by this exporter.
 /// </summary>
 public static class SurfaceHitPolygonExporter
 {
@@ -21,6 +21,10 @@ public static class SurfaceHitPolygonExporter
         public string ClassFilter = "building";
         public float DbscanEpsilonMeters = 2f;
         public int DbscanMinimumPoints = 5;
+        public float BoundaryAssignmentDistanceMeters = 4f;
+        public float GridCellSizeMeters = 0.5f;
+        public float HitRadiusMeters = 0.75f;
+        public float SimplificationToleranceMeters = 0.5f;
     }
 
     public readonly struct ExportSummary
@@ -29,6 +33,9 @@ public static class SurfaceHitPolygonExporter
         public readonly int GeoreferencedHitCount;
         public readonly int ClusterCount;
         public readonly int NoiseHitCount;
+        public readonly int BoundaryHitCount;
+        public readonly int AssignedBoundaryHitCount;
+        public readonly int SuppressedClusterCount;
         public readonly int ExportedPolygonCount;
         public readonly int OmittedClusterCount;
 
@@ -37,6 +44,9 @@ public static class SurfaceHitPolygonExporter
             int georeferencedHitCount,
             int clusterCount,
             int noiseHitCount,
+            int boundaryHitCount,
+            int assignedBoundaryHitCount,
+            int suppressedClusterCount,
             int exportedPolygonCount,
             int omittedClusterCount)
         {
@@ -44,6 +54,9 @@ public static class SurfaceHitPolygonExporter
             GeoreferencedHitCount = georeferencedHitCount;
             ClusterCount = clusterCount;
             NoiseHitCount = noiseHitCount;
+            BoundaryHitCount = boundaryHitCount;
+            AssignedBoundaryHitCount = assignedBoundaryHitCount;
+            SuppressedClusterCount = suppressedClusterCount;
             ExportedPolygonCount = exportedPolygonCount;
             OmittedClusterCount = omittedClusterCount;
         }
@@ -59,59 +72,77 @@ public static class SurfaceHitPolygonExporter
     {
         summary = default;
         error = string.Empty;
-        if (hits == null || hits.Count == 0)
-            return Fail("There are no surface hits to polygonize.", out error);
-        if (player == null)
-            return Fail("SrtDroneRaycastPlayer is missing.", out error);
-        if (options == null)
-            return Fail("Polygon export options are missing.", out error);
-        if (string.IsNullOrWhiteSpace(options.ClassFilter))
-            return Fail("Polygon class filter is empty.", out error);
-        if (options.DbscanEpsilonMeters <= 0f)
-            return Fail("DBSCAN epsilon must be greater than zero metres.", out error);
-        if (options.DbscanMinimumPoints < 3)
-            return Fail("DBSCAN minimum points must be at least three.", out error);
-        if (string.IsNullOrWhiteSpace(outputPath))
-            return Fail("Polygon output path is empty.", out error);
+        if (!TryValidateInputs(hits, player, outputPath, options, out error))
+            return false;
 
         int inputHitCount = CountClassHits(hits, options.ClassFilter);
         if (inputHitCount == 0)
             return Fail($"No surface hits have class '{options.ClassFilter}'.", out error);
 
-        List<ClusterPoint> points = BuildClusterPoints(
-            hits, options.ClassFilter, player, out int failedGeoreferenceCount);
-        if (points.Count == 0)
+        BuildClusterPoints(
+            hits,
+            options.ClassFilter,
+            player,
+            out List<ClusterPoint> corePoints,
+            out List<ClusterPoint> boundaryPoints,
+            out int failedGeoreferenceCount);
+        if (corePoints.Count == 0)
         {
             return Fail(
-                $"None of the {inputHitCount} '{options.ClassFilter}' hits could be " +
+                $"No eroded-mask core hits with class '{options.ClassFilter}' could be " +
                 "converted to WGS84.",
                 out error);
         }
 
-        ProjectToLocalMetricPlane(points);
+        MetricReference metricReference = ProjectToLocalMetricPlane(corePoints, boundaryPoints);
         int[] labels = RunDbscan(
-            points,
+            corePoints,
             options.DbscanEpsilonMeters,
             options.DbscanMinimumPoints,
-            out int clusterCount,
+            out int rawClusterCount,
             out int noiseHitCount);
-
-        var clusters = new List<List<ClusterPoint>>(clusterCount);
-        for (int clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++)
-            clusters.Add(new List<ClusterPoint>());
-        for (int pointIndex = 0; pointIndex < points.Count; pointIndex++)
+        if (rawClusterCount == 0)
         {
-            if (labels[pointIndex] >= 0)
-                clusters[labels[pointIndex]].Add(points[pointIndex]);
+            return Fail(
+                "DBSCAN did not find any core cluster. Reduce DBSCAN minimum points or " +
+                "increase epsilon.",
+                out error);
         }
+
+        Dictionary<string, int> dominantClusterByDetection = FindDominantClustersByDetection(
+            corePoints, labels);
+        BuildDominantCoreClusters(
+            corePoints,
+            labels,
+            rawClusterCount,
+            dominantClusterByDetection,
+            out List<List<ClusterPoint>> coreClusters,
+            out bool[] retainedCorePoints,
+            out int suppressedClusterCount);
+        List<List<ClusterPoint>> boundaryClusters = AssignBoundaryPoints(
+            boundaryPoints,
+            corePoints,
+            labels,
+            retainedCorePoints,
+            coreClusters,
+            dominantClusterByDetection,
+            options.BoundaryAssignmentDistanceMeters,
+            out int assignedBoundaryHitCount);
 
         var features = new JArray();
         int omittedCount = 0;
-        for (int clusterIndex = 0; clusterIndex < clusters.Count; clusterIndex++)
+        int activeClusterCount = 0;
+        for (int rawClusterIndex = 0; rawClusterIndex < coreClusters.Count; rawClusterIndex++)
         {
+            if (coreClusters[rawClusterIndex].Count == 0)
+                continue;
+            activeClusterCount++;
             if (!TryBuildFeature(
-                    clusters[clusterIndex],
-                    clusterIndex,
+                    coreClusters[rawClusterIndex],
+                    boundaryClusters[rawClusterIndex],
+                    rawClusterIndex,
+                    features.Count,
+                    metricReference,
                     options,
                     out JObject feature))
             {
@@ -125,15 +156,23 @@ public static class SurfaceHitPolygonExporter
         {
             ["provisional"] = true,
             ["class_filter"] = options.ClassFilter,
-            ["clustering_method"] = "dbscan_local_enu",
-            ["polygon_method"] = "horizontal_convex_hull",
+            ["clustering_method"] = "dbscan_core_hits_dominant_detection_cluster",
+            ["polygon_method"] = "original_mask_boundary_metric_occupancy_contour",
             ["dbscan_epsilon_m"] = options.DbscanEpsilonMeters,
             ["dbscan_minimum_points"] = options.DbscanMinimumPoints,
+            ["boundary_assignment_distance_m"] = options.BoundaryAssignmentDistanceMeters,
+            ["grid_cell_size_m"] = options.GridCellSizeMeters,
+            ["hit_radius_m"] = options.HitRadiusMeters,
+            ["simplification_tolerance_m"] = options.SimplificationToleranceMeters,
             ["input_hit_count"] = inputHitCount,
-            ["georeferenced_hit_count"] = points.Count,
+            ["core_hit_count"] = corePoints.Count,
+            ["boundary_hit_count"] = boundaryPoints.Count,
+            ["assigned_boundary_hit_count"] = assignedBoundaryHitCount,
             ["failed_georeference_hit_count"] = failedGeoreferenceCount,
-            ["cluster_count"] = clusterCount,
-            ["noise_hit_count"] = noiseHitCount,
+            ["raw_dbscan_cluster_count"] = rawClusterCount,
+            ["active_cluster_count"] = activeClusterCount,
+            ["suppressed_secondary_cluster_count"] = suppressedClusterCount,
+            ["noise_core_hit_count"] = noiseHitCount,
             ["exported_polygon_count"] = features.Count,
             ["omitted_cluster_count"] = omittedCount
         };
@@ -147,27 +186,52 @@ public static class SurfaceHitPolygonExporter
 
         if (!TryValidatePolygonFeatures(features, out error))
             return false;
-
-        try
-        {
-            string directory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
-            if (string.IsNullOrWhiteSpace(directory))
-                return Fail("Polygon output directory could not be resolved.", out error);
-            Directory.CreateDirectory(directory);
-            File.WriteAllText(outputPath, rootObject.ToString(Formatting.Indented));
-        }
-        catch (Exception exception)
-        {
-            return Fail($"Could not write polygon GeoJSON: {exception.Message}", out error);
-        }
+        if (!TryWriteGeoJson(outputPath, rootObject, out error))
+            return false;
 
         summary = new ExportSummary(
             inputHitCount,
-            points.Count,
-            clusterCount,
+            corePoints.Count + boundaryPoints.Count,
+            activeClusterCount,
             noiseHitCount,
+            boundaryPoints.Count,
+            assignedBoundaryHitCount,
+            suppressedClusterCount,
             features.Count,
             omittedCount);
+        return true;
+    }
+
+    private static bool TryValidateInputs(
+        IReadOnlyList<SurfaceHit> hits,
+        SrtDroneRaycastPlayer player,
+        string outputPath,
+        Options options,
+        out string error)
+    {
+        error = string.Empty;
+        if (hits == null || hits.Count == 0)
+            return Fail("There are no surface hits to polygonize.", out error);
+        if (player == null)
+            return Fail("SrtDroneRaycastPlayer is missing.", out error);
+        if (options == null)
+            return Fail("Polygon export options are missing.", out error);
+        if (string.IsNullOrWhiteSpace(options.ClassFilter))
+            return Fail("Polygon class filter is empty.", out error);
+        if (options.DbscanEpsilonMeters <= 0f)
+            return Fail("DBSCAN epsilon must be greater than zero metres.", out error);
+        if (options.DbscanMinimumPoints < 3)
+            return Fail("DBSCAN minimum points must be at least three.", out error);
+        if (options.BoundaryAssignmentDistanceMeters <= 0f)
+            return Fail("Boundary assignment distance must be greater than zero metres.", out error);
+        if (options.GridCellSizeMeters <= 0f)
+            return Fail("Polygon grid cell size must be greater than zero metres.", out error);
+        if (options.HitRadiusMeters <= 0f)
+            return Fail("Polygon hit radius must be greater than zero metres.", out error);
+        if (options.SimplificationToleranceMeters < 0f)
+            return Fail("Polygon simplification tolerance cannot be negative.", out error);
+        if (string.IsNullOrWhiteSpace(outputPath))
+            return Fail("Polygon output path is empty.", out error);
         return true;
     }
 
@@ -182,14 +246,17 @@ public static class SurfaceHitPolygonExporter
         return count;
     }
 
-    private static List<ClusterPoint> BuildClusterPoints(
+    private static void BuildClusterPoints(
         IReadOnlyList<SurfaceHit> hits,
         string classFilter,
         SrtDroneRaycastPlayer player,
+        out List<ClusterPoint> corePoints,
+        out List<ClusterPoint> boundaryPoints,
         out int failedGeoreferenceCount)
     {
+        corePoints = new List<ClusterPoint>();
+        boundaryPoints = new List<ClusterPoint>();
         failedGeoreferenceCount = 0;
-        var points = new List<ClusterPoint>();
         for (int i = 0; i < hits.Count; i++)
         {
             SurfaceHit hit = hits[i];
@@ -204,31 +271,41 @@ public static class SurfaceHitPolygonExporter
                 failedGeoreferenceCount++;
                 continue;
             }
-            points.Add(new ClusterPoint(hit, longitude, latitude));
+
+            var point = new ClusterPoint(hit, longitude, latitude);
+            if (hit.SampleKind == MaskSampleKind.Boundary)
+                boundaryPoints.Add(point);
+            else
+                corePoints.Add(point);
         }
-        return points;
     }
 
-    private static void ProjectToLocalMetricPlane(List<ClusterPoint> points)
+    private static MetricReference ProjectToLocalMetricPlane(
+        List<ClusterPoint> corePoints, List<ClusterPoint> boundaryPoints)
     {
         double longitudeSum = 0.0;
         double latitudeSum = 0.0;
-        for (int i = 0; i < points.Count; i++)
+        for (int i = 0; i < corePoints.Count; i++)
         {
-            longitudeSum += points[i].Geo.Longitude;
-            latitudeSum += points[i].Geo.Latitude;
+            longitudeSum += corePoints[i].Geo.Longitude;
+            latitudeSum += corePoints[i].Geo.Latitude;
         }
 
-        double referenceLongitude = longitudeSum / points.Count;
-        double referenceLatitude = latitudeSum / points.Count;
-        double longitudeScale = Math.Cos(DegreesToRadians(referenceLatitude));
+        var reference = new MetricReference(
+            longitudeSum / corePoints.Count,
+            latitudeSum / corePoints.Count);
+        ProjectPoints(corePoints, reference);
+        ProjectPoints(boundaryPoints, reference);
+        return reference;
+    }
+
+    private static void ProjectPoints(List<ClusterPoint> points, MetricReference reference)
+    {
         for (int i = 0; i < points.Count; i++)
         {
             ClusterPoint point = points[i];
-            point.EastMeters = EarthRadiusMeters *
-                DegreesToRadians(point.Geo.Longitude - referenceLongitude) * longitudeScale;
-            point.NorthMeters = EarthRadiusMeters *
-                DegreesToRadians(point.Geo.Latitude - referenceLatitude);
+            point.EastMeters = reference.LongitudeToEast(point.Geo.Longitude);
+            point.NorthMeters = reference.LatitudeToNorth(point.Geo.Latitude);
         }
     }
 
@@ -243,16 +320,14 @@ public static class SurfaceHitPolygonExporter
         for (int i = 0; i < labels.Length; i++)
             labels[i] = Unvisited;
 
-        Dictionary<GridKey, List<int>> spatialGrid = BuildSpatialGrid(points, epsilonMeters);
+        Dictionary<GridKey, List<int>> spatialGrid = BuildSpatialGrid(points, epsilonMeters, null);
         var queuedGeneration = new int[points.Count];
         int generation = 0;
         clusterCount = 0;
-
         for (int pointIndex = 0; pointIndex < points.Count; pointIndex++)
         {
             if (labels[pointIndex] != Unvisited)
                 continue;
-
             List<int> neighbours = FindNeighbours(
                 pointIndex, points, spatialGrid, epsilonMeters);
             if (neighbours.Count < minimumPoints)
@@ -266,7 +341,6 @@ public static class SurfaceHitPolygonExporter
             generation++;
             var expansionQueue = new Queue<int>();
             EnqueueUnique(neighbours, expansionQueue, queuedGeneration, generation);
-
             while (expansionQueue.Count > 0)
             {
                 int neighbourIndex = expansionQueue.Dequeue();
@@ -274,7 +348,6 @@ public static class SurfaceHitPolygonExporter
                     labels[neighbourIndex] = clusterLabel;
                 if (labels[neighbourIndex] != Unvisited)
                     continue;
-
                 labels[neighbourIndex] = clusterLabel;
                 List<int> neighbourNeighbours = FindNeighbours(
                     neighbourIndex, points, spatialGrid, epsilonMeters);
@@ -298,12 +371,151 @@ public static class SurfaceHitPolygonExporter
         return labels;
     }
 
+    private static Dictionary<string, int> FindDominantClustersByDetection(
+        List<ClusterPoint> corePoints, int[] labels)
+    {
+        var counts = new Dictionary<string, Dictionary<int, int>>(StringComparer.Ordinal);
+        for (int i = 0; i < corePoints.Count; i++)
+        {
+            int label = labels[i];
+            string detectionId = corePoints[i].Hit.LocalDetectionId ?? string.Empty;
+            if (label < 0 || string.IsNullOrWhiteSpace(detectionId))
+                continue;
+            if (!counts.TryGetValue(detectionId, out Dictionary<int, int> byCluster))
+            {
+                byCluster = new Dictionary<int, int>();
+                counts.Add(detectionId, byCluster);
+            }
+            byCluster.TryGetValue(label, out int count);
+            byCluster[label] = count + 1;
+        }
+
+        var dominant = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Dictionary<int, int>> detection in counts)
+        {
+            int bestCluster = -1;
+            int bestCount = -1;
+            foreach (KeyValuePair<int, int> candidate in detection.Value)
+            {
+                if (candidate.Value > bestCount ||
+                    (candidate.Value == bestCount && candidate.Key < bestCluster))
+                {
+                    bestCluster = candidate.Key;
+                    bestCount = candidate.Value;
+                }
+            }
+            dominant.Add(detection.Key, bestCluster);
+        }
+        return dominant;
+    }
+
+    private static void BuildDominantCoreClusters(
+        List<ClusterPoint> corePoints,
+        int[] labels,
+        int clusterCount,
+        Dictionary<string, int> dominantClusterByDetection,
+        out List<List<ClusterPoint>> clusters,
+        out bool[] retainedPoints,
+        out int suppressedClusterCount)
+    {
+        clusters = new List<List<ClusterPoint>>(clusterCount);
+        for (int clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++)
+            clusters.Add(new List<ClusterPoint>());
+        retainedPoints = new bool[corePoints.Count];
+        for (int i = 0; i < corePoints.Count; i++)
+        {
+            int label = labels[i];
+            if (label < 0)
+                continue;
+            string detectionId = corePoints[i].Hit.LocalDetectionId ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(detectionId) &&
+                dominantClusterByDetection.TryGetValue(detectionId, out int dominantCluster) &&
+                dominantCluster != label)
+            {
+                continue;
+            }
+            retainedPoints[i] = true;
+            clusters[label].Add(corePoints[i]);
+        }
+
+        suppressedClusterCount = 0;
+        for (int i = 0; i < clusters.Count; i++)
+        {
+            if (clusters[i].Count == 0)
+                suppressedClusterCount++;
+        }
+    }
+
+    private static List<List<ClusterPoint>> AssignBoundaryPoints(
+        List<ClusterPoint> boundaryPoints,
+        List<ClusterPoint> corePoints,
+        int[] labels,
+        bool[] retainedCorePoints,
+        List<List<ClusterPoint>> coreClusters,
+        Dictionary<string, int> dominantClusterByDetection,
+        double maximumDistanceMeters,
+        out int assignedCount)
+    {
+        var assigned = new List<List<ClusterPoint>>(coreClusters.Count);
+        for (int i = 0; i < coreClusters.Count; i++)
+            assigned.Add(new List<ClusterPoint>());
+        assignedCount = 0;
+
+        Dictionary<GridKey, List<int>> grid = BuildSpatialGrid(
+            corePoints, maximumDistanceMeters, retainedCorePoints);
+        double maximumSquaredDistance = maximumDistanceMeters * maximumDistanceMeters;
+        for (int boundaryIndex = 0; boundaryIndex < boundaryPoints.Count; boundaryIndex++)
+        {
+            ClusterPoint boundary = boundaryPoints[boundaryIndex];
+            string detectionId = boundary.Hit.LocalDetectionId ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(detectionId) ||
+                !dominantClusterByDetection.TryGetValue(detectionId, out int targetCluster) ||
+                targetCluster < 0 || targetCluster >= coreClusters.Count ||
+                coreClusters[targetCluster].Count == 0)
+            {
+                continue;
+            }
+
+            GridKey centre = GridKey.FromPoint(boundary, maximumDistanceMeters);
+            double nearestSquaredDistance = double.PositiveInfinity;
+            for (int xOffset = -1; xOffset <= 1; xOffset++)
+            {
+                for (int yOffset = -1; yOffset <= 1; yOffset++)
+                {
+                    var key = new GridKey(centre.X + xOffset, centre.Y + yOffset);
+                    if (!grid.TryGetValue(key, out List<int> candidates))
+                        continue;
+                    for (int i = 0; i < candidates.Count; i++)
+                    {
+                        int coreIndex = candidates[i];
+                        if (labels[coreIndex] != targetCluster)
+                            continue;
+                        double squaredDistance = SquaredDistance(
+                            boundary.EastMeters,
+                            boundary.NorthMeters,
+                            corePoints[coreIndex].EastMeters,
+                            corePoints[coreIndex].NorthMeters);
+                        if (squaredDistance < nearestSquaredDistance)
+                            nearestSquaredDistance = squaredDistance;
+                    }
+                }
+            }
+            if (nearestSquaredDistance > maximumSquaredDistance)
+                continue;
+            assigned[targetCluster].Add(boundary);
+            assignedCount++;
+        }
+        return assigned;
+    }
+
     private static Dictionary<GridKey, List<int>> BuildSpatialGrid(
-        List<ClusterPoint> points, double cellSize)
+        List<ClusterPoint> points, double cellSize, bool[] includedPoints)
     {
         var grid = new Dictionary<GridKey, List<int>>();
         for (int i = 0; i < points.Count; i++)
         {
+            if (includedPoints != null && !includedPoints[i])
+                continue;
             GridKey key = GridKey.FromPoint(points[i], cellSize);
             if (!grid.TryGetValue(key, out List<int> indices))
             {
@@ -335,10 +547,14 @@ public static class SurfaceHitPolygonExporter
                 for (int candidateIndex = 0; candidateIndex < candidates.Count; candidateIndex++)
                 {
                     int candidate = candidates[candidateIndex];
-                    double eastDelta = points[candidate].EastMeters - point.EastMeters;
-                    double northDelta = points[candidate].NorthMeters - point.NorthMeters;
-                    if (eastDelta * eastDelta + northDelta * northDelta <= squaredEpsilon)
+                    if (SquaredDistance(
+                            point.EastMeters,
+                            point.NorthMeters,
+                            points[candidate].EastMeters,
+                            points[candidate].NorthMeters) <= squaredEpsilon)
+                    {
                         neighbours.Add(candidate);
+                    }
                 }
             }
         }
@@ -362,56 +578,65 @@ public static class SurfaceHitPolygonExporter
     }
 
     private static bool TryBuildFeature(
-        List<ClusterPoint> cluster,
-        int clusterIndex,
+        List<ClusterPoint> coreCluster,
+        List<ClusterPoint> boundaryCluster,
+        int rawClusterIndex,
+        int featureIndex,
+        MetricReference metricReference,
         Options options,
         out JObject feature)
     {
         feature = null;
-        var geoPoints = new List<GeoPoint>(cluster.Count);
-        var uniqueGeoPoints = new HashSet<GeoPoint>();
-        var detectionIds = new HashSet<string>(StringComparer.Ordinal);
-        var viewIndices = new HashSet<int>();
-        for (int i = 0; i < cluster.Count; i++)
+        bool usedOccupancyContour = TryBuildOccupancyContour(
+            coreCluster,
+            boundaryCluster,
+            metricReference,
+            options,
+            out List<GeoPoint> polygon,
+            out int occupiedCellCount);
+        if (!usedOccupancyContour)
         {
-            ClusterPoint point = cluster[i];
-            if (uniqueGeoPoints.Add(point.Geo))
-                geoPoints.Add(point.Geo);
-            if (!string.IsNullOrWhiteSpace(point.Hit.LocalDetectionId))
-                detectionIds.Add(point.Hit.LocalDetectionId);
-            viewIndices.Add(point.Hit.ViewIndex);
+            polygon = BuildFallbackConvexHull(coreCluster, boundaryCluster);
+            occupiedCellCount = 0;
         }
-
-        List<GeoPoint> hull = BuildConvexHull(geoPoints);
-        if (hull.Count < 3)
+        if (polygon.Count < 3)
             return false;
 
-        var ring = new JArray();
-        for (int i = 0; i < hull.Count; i++)
-            ring.Add(new JArray(hull[i].Longitude, hull[i].Latitude));
-        ring.Add(new JArray(hull[0].Longitude, hull[0].Latitude));
-        var polygonCoordinates = new JArray();
-        polygonCoordinates.Add(ring);
-
+        var detectionIds = new HashSet<string>(StringComparer.Ordinal);
+        var viewIndices = new HashSet<int>();
+        CollectProvenance(coreCluster, detectionIds, viewIndices);
+        CollectProvenance(boundaryCluster, detectionIds, viewIndices);
         var sortedDetectionIds = new List<string>(detectionIds);
         sortedDetectionIds.Sort(StringComparer.Ordinal);
         var sortedViews = new List<int>(viewIndices);
         sortedViews.Sort();
+
+        var ring = new JArray();
+        for (int i = 0; i < polygon.Count; i++)
+            ring.Add(new JArray(polygon[i].Longitude, polygon[i].Latitude));
+        ring.Add(new JArray(polygon[0].Longitude, polygon[0].Latitude));
+        var polygonCoordinates = new JArray();
+        polygonCoordinates.Add(ring);
         feature = new JObject
         {
             ["type"] = "Feature",
-            ["id"] = $"{SanitizeId(options.ClassFilter)}_{clusterIndex:D3}",
+            ["id"] = $"{SanitizeId(options.ClassFilter)}_{featureIndex:D3}",
             ["properties"] = new JObject
             {
                 ["class"] = options.ClassFilter,
                 ["source"] = "mask_raycast_multiview",
                 ["provisional"] = true,
-                ["clustering_method"] = "dbscan_local_enu",
-                ["polygon_method"] = "horizontal_convex_hull",
+                ["clustering_method"] = "dbscan_core_hits_dominant_detection_cluster",
+                ["polygon_method"] = usedOccupancyContour
+                    ? "original_mask_boundary_metric_occupancy_contour"
+                    : "convex_hull_fallback",
+                ["raw_dbscan_cluster_index"] = rawClusterIndex,
                 ["detection_ids"] = new JArray(sortedDetectionIds),
                 ["view_indices"] = new JArray(sortedViews),
-                ["cluster_hit_count"] = cluster.Count,
-                ["hull_vertex_count"] = hull.Count
+                ["core_hit_count"] = coreCluster.Count,
+                ["assigned_boundary_hit_count"] = boundaryCluster.Count,
+                ["occupied_grid_cell_count"] = occupiedCellCount,
+                ["polygon_vertex_count"] = polygon.Count
             },
             ["geometry"] = new JObject
             {
@@ -420,6 +645,532 @@ public static class SurfaceHitPolygonExporter
             }
         };
         return true;
+    }
+
+    private static void CollectProvenance(
+        List<ClusterPoint> points,
+        HashSet<string> detectionIds,
+        HashSet<int> viewIndices)
+    {
+        for (int i = 0; i < points.Count; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(points[i].Hit.LocalDetectionId))
+                detectionIds.Add(points[i].Hit.LocalDetectionId);
+            viewIndices.Add(points[i].Hit.ViewIndex);
+        }
+    }
+
+    private static bool TryBuildOccupancyContour(
+        List<ClusterPoint> coreCluster,
+        List<ClusterPoint> boundaryCluster,
+        MetricReference metricReference,
+        Options options,
+        out List<GeoPoint> polygon,
+        out int occupiedCellCount)
+    {
+        polygon = new List<GeoPoint>();
+        occupiedCellCount = 0;
+        var occupied = new HashSet<GridKey>();
+        AddPointDiscsToGrid(coreCluster, options, occupied);
+        AddPointDiscsToGrid(boundaryCluster, options, occupied);
+        if (occupied.Count == 0)
+            return false;
+
+        HashSet<GridKey> largestComponent = FindLargestGridComponent(occupied);
+        occupiedCellCount = largestComponent.Count;
+        if (largestComponent.Count == 0)
+            return false;
+        List<GridVertex> gridRing = TraceLargestOuterGridRing(largestComponent);
+        if (gridRing.Count < 3)
+            return false;
+        gridRing = RemoveCollinearGridVertices(gridRing);
+        if (gridRing.Count < 3)
+            return false;
+
+        var metricRing = new List<MetricPoint>(gridRing.Count);
+        for (int i = 0; i < gridRing.Count; i++)
+        {
+            metricRing.Add(new MetricPoint(
+                gridRing[i].X * options.GridCellSizeMeters,
+                gridRing[i].Y * options.GridCellSizeMeters));
+        }
+        List<MetricPoint> unsimplifiedMetricRing = metricRing;
+        metricRing = SimplifyClosedRing(metricRing, options.SimplificationToleranceMeters);
+        if (metricRing.Count < 3 || !IsSimplePolygon(metricRing))
+            metricRing = unsimplifiedMetricRing;
+        if (metricRing.Count < 3 || !IsSimplePolygon(metricRing))
+            return false;
+        for (int i = 0; i < metricRing.Count; i++)
+            polygon.Add(metricReference.ToGeoPoint(metricRing[i].East, metricRing[i].North));
+        return polygon.Count >= 3;
+    }
+
+    private static void AddPointDiscsToGrid(
+        List<ClusterPoint> points, Options options, HashSet<GridKey> occupied)
+    {
+        double cellSize = options.GridCellSizeMeters;
+        double radius = options.HitRadiusMeters;
+        int cellRadius = Math.Max(1, (int)Math.Ceiling(radius / cellSize));
+        double inclusionRadius = radius + cellSize * Math.Sqrt(0.5);
+        double squaredInclusionRadius = inclusionRadius * inclusionRadius;
+        for (int i = 0; i < points.Count; i++)
+        {
+            int centreX = (int)Math.Floor(points[i].EastMeters / cellSize);
+            int centreY = (int)Math.Floor(points[i].NorthMeters / cellSize);
+            for (int xOffset = -cellRadius; xOffset <= cellRadius; xOffset++)
+            {
+                for (int yOffset = -cellRadius; yOffset <= cellRadius; yOffset++)
+                {
+                    int cellX = centreX + xOffset;
+                    int cellY = centreY + yOffset;
+                    double cellCentreEast = (cellX + 0.5) * cellSize;
+                    double cellCentreNorth = (cellY + 0.5) * cellSize;
+                    if (SquaredDistance(
+                            points[i].EastMeters,
+                            points[i].NorthMeters,
+                            cellCentreEast,
+                            cellCentreNorth) <= squaredInclusionRadius)
+                    {
+                        occupied.Add(new GridKey(cellX, cellY));
+                    }
+                }
+            }
+        }
+    }
+
+    private static HashSet<GridKey> FindLargestGridComponent(HashSet<GridKey> occupied)
+    {
+        var remaining = new HashSet<GridKey>(occupied);
+        var largest = new HashSet<GridKey>();
+        while (remaining.Count > 0)
+        {
+            GridKey seed = default;
+            foreach (GridKey candidate in remaining)
+            {
+                seed = candidate;
+                break;
+            }
+
+            var component = new HashSet<GridKey>();
+            var queue = new Queue<GridKey>();
+            remaining.Remove(seed);
+            component.Add(seed);
+            queue.Enqueue(seed);
+            while (queue.Count > 0)
+            {
+                GridKey current = queue.Dequeue();
+                AddGridNeighbour(current.X - 1, current.Y, remaining, component, queue);
+                AddGridNeighbour(current.X + 1, current.Y, remaining, component, queue);
+                AddGridNeighbour(current.X, current.Y - 1, remaining, component, queue);
+                AddGridNeighbour(current.X, current.Y + 1, remaining, component, queue);
+            }
+            if (component.Count > largest.Count)
+                largest = component;
+        }
+        return largest;
+    }
+
+    private static void AddGridNeighbour(
+        int x,
+        int y,
+        HashSet<GridKey> remaining,
+        HashSet<GridKey> component,
+        Queue<GridKey> queue)
+    {
+        var neighbour = new GridKey(x, y);
+        if (!remaining.Remove(neighbour))
+            return;
+        component.Add(neighbour);
+        queue.Enqueue(neighbour);
+    }
+
+    private static List<GridVertex> TraceLargestOuterGridRing(HashSet<GridKey> occupied)
+    {
+        var edges = new List<DirectedGridEdge>();
+        foreach (GridKey cell in occupied)
+        {
+            if (!occupied.Contains(new GridKey(cell.X, cell.Y - 1)))
+                edges.Add(new DirectedGridEdge(cell.X, cell.Y, cell.X + 1, cell.Y));
+            if (!occupied.Contains(new GridKey(cell.X + 1, cell.Y)))
+                edges.Add(new DirectedGridEdge(cell.X + 1, cell.Y, cell.X + 1, cell.Y + 1));
+            if (!occupied.Contains(new GridKey(cell.X, cell.Y + 1)))
+                edges.Add(new DirectedGridEdge(cell.X + 1, cell.Y + 1, cell.X, cell.Y + 1));
+            if (!occupied.Contains(new GridKey(cell.X - 1, cell.Y)))
+                edges.Add(new DirectedGridEdge(cell.X, cell.Y + 1, cell.X, cell.Y));
+        }
+
+        var outgoing = new Dictionary<GridVertex, List<int>>();
+        for (int i = 0; i < edges.Count; i++)
+        {
+            if (!outgoing.TryGetValue(edges[i].Start, out List<int> edgeIndices))
+            {
+                edgeIndices = new List<int>();
+                outgoing.Add(edges[i].Start, edgeIndices);
+            }
+            edgeIndices.Add(i);
+        }
+
+        var used = new bool[edges.Count];
+        List<GridVertex> largestRing = null;
+        double largestArea = double.NegativeInfinity;
+        for (int startEdgeIndex = 0; startEdgeIndex < edges.Count; startEdgeIndex++)
+        {
+            if (used[startEdgeIndex])
+                continue;
+            List<GridVertex> ring = TraceGridRing(startEdgeIndex, edges, outgoing, used);
+            if (ring.Count < 3)
+                continue;
+            double signedArea = SignedArea(ring);
+            if (signedArea > largestArea)
+            {
+                largestArea = signedArea;
+                largestRing = ring;
+            }
+        }
+        return largestRing ?? new List<GridVertex>();
+    }
+
+    private static List<GridVertex> TraceGridRing(
+        int startEdgeIndex,
+        List<DirectedGridEdge> edges,
+        Dictionary<GridVertex, List<int>> outgoing,
+        bool[] used)
+    {
+        var ring = new List<GridVertex>();
+        DirectedGridEdge startEdge = edges[startEdgeIndex];
+        GridVertex start = startEdge.Start;
+        int currentEdgeIndex = startEdgeIndex;
+        ring.Add(start);
+        for (int guard = 0; guard <= edges.Count; guard++)
+        {
+            if (used[currentEdgeIndex])
+                return new List<GridVertex>();
+            DirectedGridEdge current = edges[currentEdgeIndex];
+            used[currentEdgeIndex] = true;
+            if (current.End.Equals(start))
+                return ring;
+            ring.Add(current.End);
+            if (!outgoing.TryGetValue(current.End, out List<int> candidates))
+                return new List<GridVertex>();
+            int nextEdgeIndex = SelectNextGridEdge(current.Direction, candidates, edges, used);
+            if (nextEdgeIndex < 0)
+                return new List<GridVertex>();
+            currentEdgeIndex = nextEdgeIndex;
+        }
+        return new List<GridVertex>();
+    }
+
+    private static int SelectNextGridEdge(
+        int incomingDirection,
+        List<int> candidates,
+        List<DirectedGridEdge> edges,
+        bool[] used)
+    {
+        int bestIndex = -1;
+        int bestRank = int.MaxValue;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            int edgeIndex = candidates[i];
+            if (used[edgeIndex])
+                continue;
+            int turn = (edges[edgeIndex].Direction - incomingDirection + 4) % 4;
+            int rank;
+            switch (turn)
+            {
+                case 3: rank = 0; break;
+                case 0: rank = 1; break;
+                case 1: rank = 2; break;
+                default: rank = 3; break;
+            }
+            if (rank < bestRank)
+            {
+                bestRank = rank;
+                bestIndex = edgeIndex;
+            }
+        }
+        return bestIndex;
+    }
+
+    private static double SignedArea(List<GridVertex> ring)
+    {
+        double twiceArea = 0.0;
+        for (int i = 0; i < ring.Count; i++)
+        {
+            GridVertex current = ring[i];
+            GridVertex next = ring[(i + 1) % ring.Count];
+            twiceArea += (double)current.X * next.Y - (double)next.X * current.Y;
+        }
+        return twiceArea * 0.5;
+    }
+
+    private static List<GridVertex> RemoveCollinearGridVertices(List<GridVertex> ring)
+    {
+        if (ring.Count < 4)
+            return ring;
+        var simplified = new List<GridVertex>();
+        for (int i = 0; i < ring.Count; i++)
+        {
+            GridVertex previous = ring[(i - 1 + ring.Count) % ring.Count];
+            GridVertex current = ring[i];
+            GridVertex next = ring[(i + 1) % ring.Count];
+            long cross = (long)(current.X - previous.X) * (next.Y - current.Y) -
+                         (long)(current.Y - previous.Y) * (next.X - current.X);
+            if (cross != 0)
+                simplified.Add(current);
+        }
+        return simplified.Count >= 3 ? simplified : ring;
+    }
+
+    private static List<MetricPoint> SimplifyClosedRing(
+        List<MetricPoint> ring, double tolerance)
+    {
+        if (ring.Count <= 3 || tolerance <= 0.0)
+            return ring;
+        int first = 0;
+        int second = FindFarthestPoint(ring, first);
+        first = FindFarthestPoint(ring, second);
+        second = FindFarthestPoint(ring, first);
+        if (first == second)
+            return ring;
+
+        List<MetricPoint> firstArc = BuildRingArc(ring, first, second);
+        List<MetricPoint> secondArc = BuildRingArc(ring, second, first);
+        firstArc = SimplifyOpenLine(firstArc, tolerance);
+        secondArc = SimplifyOpenLine(secondArc, tolerance);
+        var simplified = new List<MetricPoint>(firstArc);
+        for (int i = 1; i < secondArc.Count - 1; i++)
+            simplified.Add(secondArc[i]);
+        return simplified.Count >= 3 ? simplified : ring;
+    }
+
+    private static int FindFarthestPoint(List<MetricPoint> points, int originIndex)
+    {
+        int farthestIndex = originIndex;
+        double farthestDistance = -1.0;
+        for (int i = 0; i < points.Count; i++)
+        {
+            double distance = SquaredDistance(
+                points[originIndex].East,
+                points[originIndex].North,
+                points[i].East,
+                points[i].North);
+            if (distance > farthestDistance)
+            {
+                farthestDistance = distance;
+                farthestIndex = i;
+            }
+        }
+        return farthestIndex;
+    }
+
+    private static List<MetricPoint> BuildRingArc(
+        List<MetricPoint> ring, int startIndex, int endIndex)
+    {
+        var arc = new List<MetricPoint>();
+        int index = startIndex;
+        arc.Add(ring[index]);
+        while (index != endIndex)
+        {
+            index = (index + 1) % ring.Count;
+            arc.Add(ring[index]);
+        }
+        return arc;
+    }
+
+    private static List<MetricPoint> SimplifyOpenLine(
+        List<MetricPoint> points, double tolerance)
+    {
+        if (points.Count <= 2)
+            return points;
+        var keep = new bool[points.Count];
+        keep[0] = true;
+        keep[points.Count - 1] = true;
+        MarkRamerDouglasPeucker(points, 0, points.Count - 1, tolerance * tolerance, keep);
+        var simplified = new List<MetricPoint>();
+        for (int i = 0; i < points.Count; i++)
+        {
+            if (keep[i])
+                simplified.Add(points[i]);
+        }
+        return simplified;
+    }
+
+    private static void MarkRamerDouglasPeucker(
+        List<MetricPoint> points,
+        int startIndex,
+        int endIndex,
+        double squaredTolerance,
+        bool[] keep)
+    {
+        if (endIndex <= startIndex + 1)
+            return;
+        double maximumSquaredDistance = -1.0;
+        int farthestIndex = -1;
+        for (int i = startIndex + 1; i < endIndex; i++)
+        {
+            double squaredDistance = SquaredDistanceToSegment(
+                points[i], points[startIndex], points[endIndex]);
+            if (squaredDistance > maximumSquaredDistance)
+            {
+                maximumSquaredDistance = squaredDistance;
+                farthestIndex = i;
+            }
+        }
+        if (maximumSquaredDistance <= squaredTolerance || farthestIndex < 0)
+            return;
+        keep[farthestIndex] = true;
+        MarkRamerDouglasPeucker(
+            points, startIndex, farthestIndex, squaredTolerance, keep);
+        MarkRamerDouglasPeucker(
+            points, farthestIndex, endIndex, squaredTolerance, keep);
+    }
+
+    private static double SquaredDistanceToSegment(
+        MetricPoint point, MetricPoint start, MetricPoint end)
+    {
+        double deltaEast = end.East - start.East;
+        double deltaNorth = end.North - start.North;
+        double squaredLength = deltaEast * deltaEast + deltaNorth * deltaNorth;
+        if (squaredLength <= double.Epsilon)
+        {
+            return SquaredDistance(
+                point.East, point.North, start.East, start.North);
+        }
+        double projection = ((point.East - start.East) * deltaEast +
+                             (point.North - start.North) * deltaNorth) / squaredLength;
+        projection = Math.Max(0.0, Math.Min(1.0, projection));
+        return SquaredDistance(
+            point.East,
+            point.North,
+            start.East + projection * deltaEast,
+            start.North + projection * deltaNorth);
+    }
+
+    private static bool IsSimplePolygon(List<MetricPoint> ring)
+    {
+        if (ring.Count < 3)
+            return false;
+        for (int firstEdge = 0; firstEdge < ring.Count; firstEdge++)
+        {
+            int firstEnd = (firstEdge + 1) % ring.Count;
+            for (int secondEdge = firstEdge + 1; secondEdge < ring.Count; secondEdge++)
+            {
+                int secondEnd = (secondEdge + 1) % ring.Count;
+                if (firstEdge == secondEdge || firstEnd == secondEdge ||
+                    secondEnd == firstEdge)
+                {
+                    continue;
+                }
+                if (SegmentsIntersect(
+                        ring[firstEdge], ring[firstEnd], ring[secondEdge], ring[secondEnd]))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool SegmentsIntersect(
+        MetricPoint firstStart,
+        MetricPoint firstEnd,
+        MetricPoint secondStart,
+        MetricPoint secondEnd)
+    {
+        double firstSideStart = MetricCross(firstStart, firstEnd, secondStart);
+        double firstSideEnd = MetricCross(firstStart, firstEnd, secondEnd);
+        double secondSideStart = MetricCross(secondStart, secondEnd, firstStart);
+        double secondSideEnd = MetricCross(secondStart, secondEnd, firstEnd);
+        const double tolerance = 1e-9;
+        if (Math.Abs(firstSideStart) <= tolerance &&
+            IsPointOnSegment(secondStart, firstStart, firstEnd, tolerance))
+            return true;
+        if (Math.Abs(firstSideEnd) <= tolerance &&
+            IsPointOnSegment(secondEnd, firstStart, firstEnd, tolerance))
+            return true;
+        if (Math.Abs(secondSideStart) <= tolerance &&
+            IsPointOnSegment(firstStart, secondStart, secondEnd, tolerance))
+            return true;
+        if (Math.Abs(secondSideEnd) <= tolerance &&
+            IsPointOnSegment(firstEnd, secondStart, secondEnd, tolerance))
+            return true;
+        return (firstSideStart > 0.0) != (firstSideEnd > 0.0) &&
+               (secondSideStart > 0.0) != (secondSideEnd > 0.0);
+    }
+
+    private static double MetricCross(
+        MetricPoint origin, MetricPoint first, MetricPoint second)
+    {
+        return (first.East - origin.East) * (second.North - origin.North) -
+               (first.North - origin.North) * (second.East - origin.East);
+    }
+
+    private static bool IsPointOnSegment(
+        MetricPoint point,
+        MetricPoint start,
+        MetricPoint end,
+        double tolerance)
+    {
+        return point.East >= Math.Min(start.East, end.East) - tolerance &&
+               point.East <= Math.Max(start.East, end.East) + tolerance &&
+               point.North >= Math.Min(start.North, end.North) - tolerance &&
+               point.North <= Math.Max(start.North, end.North) + tolerance;
+    }
+
+    private static List<GeoPoint> BuildFallbackConvexHull(
+        List<ClusterPoint> coreCluster, List<ClusterPoint> boundaryCluster)
+    {
+        var points = new List<GeoPoint>(coreCluster.Count + boundaryCluster.Count);
+        var unique = new HashSet<GeoPoint>();
+        AddUniqueGeoPoints(coreCluster, unique, points);
+        AddUniqueGeoPoints(boundaryCluster, unique, points);
+        return BuildConvexHull(points);
+    }
+
+    private static void AddUniqueGeoPoints(
+        List<ClusterPoint> source, HashSet<GeoPoint> unique, List<GeoPoint> output)
+    {
+        for (int i = 0; i < source.Count; i++)
+        {
+            if (unique.Add(source[i].Geo))
+                output.Add(source[i].Geo);
+        }
+    }
+
+    private static List<GeoPoint> BuildConvexHull(List<GeoPoint> points)
+    {
+        if (points.Count < 3)
+            return points;
+        points.Sort(GeoPoint.Compare);
+        var lower = new List<GeoPoint>();
+        for (int i = 0; i < points.Count; i++)
+        {
+            while (lower.Count >= 2 && GeoCross(
+                       lower[lower.Count - 2], lower[lower.Count - 1], points[i]) <= 0.0)
+            {
+                lower.RemoveAt(lower.Count - 1);
+            }
+            lower.Add(points[i]);
+        }
+
+        var upper = new List<GeoPoint>();
+        for (int i = points.Count - 1; i >= 0; i--)
+        {
+            while (upper.Count >= 2 && GeoCross(
+                       upper[upper.Count - 2], upper[upper.Count - 1], points[i]) <= 0.0)
+            {
+                upper.RemoveAt(upper.Count - 1);
+            }
+            upper.Add(points[i]);
+        }
+        lower.RemoveAt(lower.Count - 1);
+        upper.RemoveAt(upper.Count - 1);
+        lower.AddRange(upper);
+        return lower;
+    }
+
+    private static double GeoCross(GeoPoint origin, GeoPoint left, GeoPoint right)
+    {
+        return (left.Longitude - origin.Longitude) * (right.Latitude - origin.Latitude) -
+               (left.Latitude - origin.Latitude) * (right.Longitude - origin.Longitude);
     }
 
     private static bool TryValidatePolygonFeatures(JArray features, out string error)
@@ -438,7 +1189,6 @@ public static class SurfaceHitPolygonExporter
                     $"Generated feature {featureIndex} does not contain valid Polygon coordinates.",
                     out error);
             }
-
             for (int ringIndex = 0; ringIndex < coordinates.Count; ringIndex++)
             {
                 JArray ring = coordinates[ringIndex] as JArray;
@@ -449,7 +1199,6 @@ public static class SurfaceHitPolygonExporter
                         "four positions.",
                         out error);
                 }
-
                 for (int positionIndex = 0; positionIndex < ring.Count; positionIndex++)
                 {
                     JArray position = ring[positionIndex] as JArray;
@@ -462,7 +1211,6 @@ public static class SurfaceHitPolygonExporter
                             out error);
                     }
                 }
-
                 if (!JToken.DeepEquals(ring[0], ring[ring.Count - 1]))
                 {
                     return Fail(
@@ -474,54 +1222,49 @@ public static class SurfaceHitPolygonExporter
         return true;
     }
 
+    private static bool TryWriteGeoJson(string outputPath, JObject rootObject, out string error)
+    {
+        try
+        {
+            string directory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+            if (string.IsNullOrWhiteSpace(directory))
+                return Fail("Polygon output directory could not be resolved.", out error);
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(outputPath, rootObject.ToString(Formatting.Indented));
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            return Fail($"Could not write polygon GeoJSON: {exception.Message}", out error);
+        }
+    }
+
     private static bool IsNumeric(JToken token)
     {
         return token != null &&
                (token.Type == JTokenType.Integer || token.Type == JTokenType.Float);
     }
 
-    private static List<GeoPoint> BuildConvexHull(List<GeoPoint> points)
+    private static double SquaredDistance(
+        double firstEast,
+        double firstNorth,
+        double secondEast,
+        double secondNorth)
     {
-        if (points.Count < 3)
-            return points;
-        points.Sort(GeoPoint.Compare);
-        var lower = new List<GeoPoint>();
-        for (int i = 0; i < points.Count; i++)
-        {
-            while (lower.Count >= 2 && Cross(
-                       lower[lower.Count - 2], lower[lower.Count - 1], points[i]) <= 0.0)
-            {
-                lower.RemoveAt(lower.Count - 1);
-            }
-            lower.Add(points[i]);
-        }
-
-        var upper = new List<GeoPoint>();
-        for (int i = points.Count - 1; i >= 0; i--)
-        {
-            while (upper.Count >= 2 && Cross(
-                       upper[upper.Count - 2], upper[upper.Count - 1], points[i]) <= 0.0)
-            {
-                upper.RemoveAt(upper.Count - 1);
-            }
-            upper.Add(points[i]);
-        }
-
-        lower.RemoveAt(lower.Count - 1);
-        upper.RemoveAt(upper.Count - 1);
-        lower.AddRange(upper);
-        return lower;
-    }
-
-    private static double Cross(GeoPoint origin, GeoPoint left, GeoPoint right)
-    {
-        return (left.Longitude - origin.Longitude) * (right.Latitude - origin.Latitude) -
-               (left.Latitude - origin.Latitude) * (right.Longitude - origin.Longitude);
+        double eastDelta = firstEast - secondEast;
+        double northDelta = firstNorth - secondNorth;
+        return eastDelta * eastDelta + northDelta * northDelta;
     }
 
     private static double DegreesToRadians(double degrees)
     {
         return degrees * Math.PI / 180.0;
+    }
+
+    private static double RadiansToDegrees(double radians)
+    {
+        return radians * 180.0 / Math.PI;
     }
 
     private static string SanitizeId(string value)
@@ -554,6 +1297,50 @@ public static class SurfaceHitPolygonExporter
         {
             Hit = hit;
             Geo = new GeoPoint(longitude, latitude);
+        }
+    }
+
+    private readonly struct MetricReference
+    {
+        private readonly double longitude;
+        private readonly double latitude;
+        private readonly double longitudeScale;
+
+        public MetricReference(double longitude, double latitude)
+        {
+            this.longitude = longitude;
+            this.latitude = latitude;
+            longitudeScale = Math.Cos(DegreesToRadians(latitude));
+        }
+
+        public double LongitudeToEast(double value)
+        {
+            return EarthRadiusMeters * DegreesToRadians(value - longitude) * longitudeScale;
+        }
+
+        public double LatitudeToNorth(double value)
+        {
+            return EarthRadiusMeters * DegreesToRadians(value - latitude);
+        }
+
+        public GeoPoint ToGeoPoint(double east, double north)
+        {
+            double resultLatitude = latitude + RadiansToDegrees(north / EarthRadiusMeters);
+            double resultLongitude = longitude +
+                                     RadiansToDegrees(east / (EarthRadiusMeters * longitudeScale));
+            return new GeoPoint(resultLongitude, resultLatitude);
+        }
+    }
+
+    private readonly struct MetricPoint
+    {
+        public readonly double East;
+        public readonly double North;
+
+        public MetricPoint(double east, double north)
+        {
+            East = east;
+            North = north;
         }
     }
 
@@ -591,6 +1378,57 @@ public static class SurfaceHitPolygonExporter
             {
                 return (X * 397) ^ Y;
             }
+        }
+    }
+
+    private readonly struct GridVertex : IEquatable<GridVertex>
+    {
+        public readonly int X;
+        public readonly int Y;
+
+        public GridVertex(int x, int y)
+        {
+            X = x;
+            Y = y;
+        }
+
+        public bool Equals(GridVertex other)
+        {
+            return X == other.X && Y == other.Y;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is GridVertex other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                return (X * 397) ^ Y;
+            }
+        }
+    }
+
+    private readonly struct DirectedGridEdge
+    {
+        public readonly GridVertex Start;
+        public readonly GridVertex End;
+        public readonly int Direction;
+
+        public DirectedGridEdge(int startX, int startY, int endX, int endY)
+        {
+            Start = new GridVertex(startX, startY);
+            End = new GridVertex(endX, endY);
+            if (endX > startX)
+                Direction = 0;
+            else if (endY > startY)
+                Direction = 1;
+            else if (endX < startX)
+                Direction = 2;
+            else
+                Direction = 3;
         }
     }
 
