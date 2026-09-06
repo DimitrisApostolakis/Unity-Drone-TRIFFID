@@ -105,10 +105,33 @@ when one contour contains many narrow gaps. Smaller grid cells retain more detai
 while the simplification tolerance controls how angular the final GeoJSON ring remains.
 
 Clusters with fewer than three valid contour positions are reported as omitted. Raw core and
-boundary hits remain unchanged. A semantically wrong but geometrically dense building mask can
-still produce a polygon; the exporter deliberately does not reject objects by view count or area.
+boundary hits remain unchanged. A semantically wrong but geometrically dense building mask is
+not rejected by geometry alone. The optional semantic-conflict stage compares every building
+core hit with nearby core hits from contradictory classes. It rejects a candidate only when both
+the configured hit-count and overlap-ratio thresholds are reached. It deliberately does not
+reject objects by view count or area.
 
 Tree masks such as `green_trees_view00_component17.png` are discovered automatically as class
 `green_trees`. They are projected and included in the CSV and gizmos. With **Polygon Class Filter**
-set to `building`, they do not create building polygons and are not yet used to remove conflicting
-building hits.
+set to `building`, the default semantic filter uses them as contradictory evidence with these
+initial settings:
+
+- **Exclude Semantic Conflicts:** enabled
+- **Semantic Conflict Class Filters:** `green_trees,tree,vegetation`
+- **Semantic Conflict Distance Meters:** `1.5`
+- **Semantic Conflict Ratio Threshold:** `0.65`
+- **Semantic Conflict Minimum Hits:** `5`
+
+For each retained feature the GeoJSON stores its conflict ratio and the tree detection IDs that
+contributed to it. Removed candidates are listed under
+`metadata.rejected_semantic_conflicts`, so thresholds can be tuned without guessing. Lower the
+ratio threshold to remove more candidates; raise it when legitimate buildings near tree canopies
+are rejected. This filter can only remove false buildings supported by one of the configured
+contradictory classes; unrelated false building masks still require better detections or another
+semantic class.
+
+For a controlled before/after test, project all masks once, disable **Exclude Semantic
+Conflicts**, and export a baseline. The polygons remain present but include their measured
+`semantic_conflict_ratio`. Then enable the option and export again; no second raycast is needed.
+Compare the two timestamped GeoJSON files and inspect
+`metadata.rejected_semantic_conflicts` in the filtered file.

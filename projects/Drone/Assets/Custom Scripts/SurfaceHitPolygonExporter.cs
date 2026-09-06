@@ -25,6 +25,11 @@ public static class SurfaceHitPolygonExporter
         public float GridCellSizeMeters = 0.5f;
         public float HitRadiusMeters = 0.75f;
         public float SimplificationToleranceMeters = 0.5f;
+        public bool ExcludeSemanticConflicts = true;
+        public string SemanticConflictClassFilters = "green_trees,tree,vegetation";
+        public float SemanticConflictDistanceMeters = 1.5f;
+        public float SemanticConflictRatioThreshold = 0.65f;
+        public int SemanticConflictMinimumHits = 5;
     }
 
     public readonly struct ExportSummary
@@ -36,6 +41,8 @@ public static class SurfaceHitPolygonExporter
         public readonly int BoundaryHitCount;
         public readonly int AssignedBoundaryHitCount;
         public readonly int SuppressedClusterCount;
+        public readonly int SemanticConflictSourceHitCount;
+        public readonly int RejectedSemanticConflictCount;
         public readonly int ExportedPolygonCount;
         public readonly int OmittedClusterCount;
 
@@ -47,6 +54,8 @@ public static class SurfaceHitPolygonExporter
             int boundaryHitCount,
             int assignedBoundaryHitCount,
             int suppressedClusterCount,
+            int semanticConflictSourceHitCount,
+            int rejectedSemanticConflictCount,
             int exportedPolygonCount,
             int omittedClusterCount)
         {
@@ -57,6 +66,8 @@ public static class SurfaceHitPolygonExporter
             BoundaryHitCount = boundaryHitCount;
             AssignedBoundaryHitCount = assignedBoundaryHitCount;
             SuppressedClusterCount = suppressedClusterCount;
+            SemanticConflictSourceHitCount = semanticConflictSourceHitCount;
+            RejectedSemanticConflictCount = rejectedSemanticConflictCount;
             ExportedPolygonCount = exportedPolygonCount;
             OmittedClusterCount = omittedClusterCount;
         }
@@ -95,6 +106,22 @@ public static class SurfaceHitPolygonExporter
         }
 
         MetricReference metricReference = ProjectToLocalMetricPlane(corePoints, boundaryPoints);
+        HashSet<string> semanticConflictClasses = ParseClassFilters(
+            options.SemanticConflictClassFilters);
+        semanticConflictClasses.Remove(options.ClassFilter);
+        List<ClusterPoint> semanticConflictPoints = BuildSemanticConflictPoints(
+            hits,
+            semanticConflictClasses,
+            player,
+            metricReference,
+            out int failedSemanticConflictGeoreferenceCount);
+        Dictionary<GridKey, List<int>> semanticConflictGrid =
+            semanticConflictPoints.Count > 0
+                ? BuildSpatialGrid(
+                    semanticConflictPoints,
+                    options.SemanticConflictDistanceMeters,
+                    null)
+                : new Dictionary<GridKey, List<int>>();
         int[] labels = RunDbscan(
             corePoints,
             options.DbscanEpsilonMeters,
@@ -130,6 +157,7 @@ public static class SurfaceHitPolygonExporter
             out int assignedBoundaryHitCount);
 
         var features = new JArray();
+        var rejectedSemanticConflicts = new JArray();
         int omittedCount = 0;
         int activeClusterCount = 0;
         for (int rawClusterIndex = 0; rawClusterIndex < coreClusters.Count; rawClusterIndex++)
@@ -137,6 +165,23 @@ public static class SurfaceHitPolygonExporter
             if (coreClusters[rawClusterIndex].Count == 0)
                 continue;
             activeClusterCount++;
+
+            SemanticConflictAssessment conflict = AssessSemanticConflict(
+                coreClusters[rawClusterIndex],
+                semanticConflictPoints,
+                semanticConflictGrid,
+                options);
+            if (conflict.ShouldReject)
+            {
+                rejectedSemanticConflicts.Add(BuildSemanticConflictDiagnostic(
+                    coreClusters[rawClusterIndex],
+                    boundaryClusters[rawClusterIndex],
+                    rawClusterIndex,
+                    options.ClassFilter,
+                    conflict));
+                continue;
+            }
+
             if (!TryBuildFeature(
                     coreClusters[rawClusterIndex],
                     boundaryClusters[rawClusterIndex],
@@ -144,6 +189,7 @@ public static class SurfaceHitPolygonExporter
                     features.Count,
                     metricReference,
                     options,
+                    conflict,
                     out JObject feature))
             {
                 omittedCount++;
@@ -164,6 +210,16 @@ public static class SurfaceHitPolygonExporter
             ["grid_cell_size_m"] = options.GridCellSizeMeters,
             ["hit_radius_m"] = options.HitRadiusMeters,
             ["simplification_tolerance_m"] = options.SimplificationToleranceMeters,
+            ["semantic_conflict_filter_enabled"] = options.ExcludeSemanticConflicts,
+            ["semantic_conflict_classes"] = SortedStringArray(semanticConflictClasses),
+            ["semantic_conflict_distance_m"] = options.SemanticConflictDistanceMeters,
+            ["semantic_conflict_ratio_threshold"] = options.SemanticConflictRatioThreshold,
+            ["semantic_conflict_minimum_hits"] = options.SemanticConflictMinimumHits,
+            ["semantic_conflict_source_hit_count"] = semanticConflictPoints.Count,
+            ["failed_semantic_conflict_georeference_hit_count"] =
+                failedSemanticConflictGeoreferenceCount,
+            ["rejected_semantic_conflict_count"] = rejectedSemanticConflicts.Count,
+            ["rejected_semantic_conflicts"] = rejectedSemanticConflicts,
             ["input_hit_count"] = inputHitCount,
             ["core_hit_count"] = corePoints.Count,
             ["boundary_hit_count"] = boundaryPoints.Count,
@@ -197,6 +253,8 @@ public static class SurfaceHitPolygonExporter
             boundaryPoints.Count,
             assignedBoundaryHitCount,
             suppressedClusterCount,
+            semanticConflictPoints.Count,
+            rejectedSemanticConflicts.Count,
             features.Count,
             omittedCount);
         return true;
@@ -230,9 +288,71 @@ public static class SurfaceHitPolygonExporter
             return Fail("Polygon hit radius must be greater than zero metres.", out error);
         if (options.SimplificationToleranceMeters < 0f)
             return Fail("Polygon simplification tolerance cannot be negative.", out error);
+        if (options.SemanticConflictDistanceMeters <= 0f)
+            return Fail("Semantic conflict distance must be greater than zero metres.", out error);
+        if (options.SemanticConflictRatioThreshold < 0f ||
+            options.SemanticConflictRatioThreshold > 1f)
+        {
+            return Fail("Semantic conflict ratio threshold must be between zero and one.", out error);
+        }
+        if (options.SemanticConflictMinimumHits < 1)
+            return Fail("Semantic conflict minimum hits must be at least one.", out error);
         if (string.IsNullOrWhiteSpace(outputPath))
             return Fail("Polygon output path is empty.", out error);
         return true;
+    }
+
+    private static HashSet<string> ParseClassFilters(string value)
+    {
+        var classes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(value))
+            return classes;
+
+        string[] tokens = value.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            string className = tokens[i].Trim();
+            if (!string.IsNullOrWhiteSpace(className))
+                classes.Add(className);
+        }
+        return classes;
+    }
+
+    private static List<ClusterPoint> BuildSemanticConflictPoints(
+        IReadOnlyList<SurfaceHit> hits,
+        HashSet<string> classFilters,
+        SrtDroneRaycastPlayer player,
+        MetricReference metricReference,
+        out int failedGeoreferenceCount)
+    {
+        var points = new List<ClusterPoint>();
+        failedGeoreferenceCount = 0;
+        if (classFilters.Count == 0)
+            return points;
+
+        for (int i = 0; i < hits.Count; i++)
+        {
+            SurfaceHit hit = hits[i];
+            if (hit.SampleKind != MaskSampleKind.Core || !classFilters.Contains(hit.ClassName))
+                continue;
+            if (!player.TryConvertWorldToWgs84(
+                    hit.WorldPoint,
+                    out double longitude,
+                    out double latitude,
+                    out double altitude))
+            {
+                failedGeoreferenceCount++;
+                continue;
+            }
+
+            var point = new ClusterPoint(hit, longitude, latitude)
+            {
+                EastMeters = metricReference.LongitudeToEast(longitude),
+                NorthMeters = metricReference.LatitudeToNorth(latitude)
+            };
+            points.Add(point);
+        }
+        return points;
     }
 
     private static int CountClassHits(IReadOnlyList<SurfaceHit> hits, string classFilter)
@@ -577,6 +697,103 @@ public static class SurfaceHitPolygonExporter
         }
     }
 
+    private static SemanticConflictAssessment AssessSemanticConflict(
+        List<ClusterPoint> coreCluster,
+        List<ClusterPoint> semanticConflictPoints,
+        Dictionary<GridKey, List<int>> semanticConflictGrid,
+        Options options)
+    {
+        if (coreCluster.Count == 0 || semanticConflictPoints.Count == 0)
+        {
+            return new SemanticConflictAssessment(
+                0,
+                coreCluster.Count,
+                new HashSet<string>(StringComparer.Ordinal),
+                new HashSet<int>(),
+                false);
+        }
+
+        double maximumDistance = options.SemanticConflictDistanceMeters;
+        double maximumSquaredDistance = maximumDistance * maximumDistance;
+        int conflictingCoreHitCount = 0;
+        var conflictDetectionIds = new HashSet<string>(StringComparer.Ordinal);
+        var conflictViewIndices = new HashSet<int>();
+        for (int coreIndex = 0; coreIndex < coreCluster.Count; coreIndex++)
+        {
+            ClusterPoint corePoint = coreCluster[coreIndex];
+            GridKey centre = GridKey.FromPoint(corePoint, maximumDistance);
+            bool hasConflict = false;
+            for (int xOffset = -1; xOffset <= 1; xOffset++)
+            {
+                for (int yOffset = -1; yOffset <= 1; yOffset++)
+                {
+                    var key = new GridKey(centre.X + xOffset, centre.Y + yOffset);
+                    if (!semanticConflictGrid.TryGetValue(key, out List<int> candidates))
+                        continue;
+                    for (int i = 0; i < candidates.Count; i++)
+                    {
+                        ClusterPoint candidate = semanticConflictPoints[candidates[i]];
+                        if (SquaredDistance(
+                                corePoint.EastMeters,
+                                corePoint.NorthMeters,
+                                candidate.EastMeters,
+                                candidate.NorthMeters) > maximumSquaredDistance)
+                        {
+                            continue;
+                        }
+
+                        hasConflict = true;
+                        if (!string.IsNullOrWhiteSpace(candidate.Hit.LocalDetectionId))
+                            conflictDetectionIds.Add(candidate.Hit.LocalDetectionId);
+                        conflictViewIndices.Add(candidate.Hit.ViewIndex);
+                    }
+                }
+            }
+            if (hasConflict)
+                conflictingCoreHitCount++;
+        }
+
+        double ratio = coreCluster.Count > 0
+            ? conflictingCoreHitCount / (double)coreCluster.Count
+            : 0.0;
+        bool shouldReject = options.ExcludeSemanticConflicts &&
+            conflictingCoreHitCount >= options.SemanticConflictMinimumHits &&
+            ratio >= options.SemanticConflictRatioThreshold;
+        return new SemanticConflictAssessment(
+            conflictingCoreHitCount,
+            coreCluster.Count,
+            conflictDetectionIds,
+            conflictViewIndices,
+            shouldReject);
+    }
+
+    private static JObject BuildSemanticConflictDiagnostic(
+        List<ClusterPoint> coreCluster,
+        List<ClusterPoint> boundaryCluster,
+        int rawClusterIndex,
+        string classFilter,
+        SemanticConflictAssessment conflict)
+    {
+        var buildingDetectionIds = new HashSet<string>(StringComparer.Ordinal);
+        var buildingViewIndices = new HashSet<int>();
+        CollectProvenance(coreCluster, buildingDetectionIds, buildingViewIndices);
+        CollectProvenance(boundaryCluster, buildingDetectionIds, buildingViewIndices);
+
+        return new JObject
+        {
+            ["candidate_id"] =
+                $"{SanitizeId(classFilter)}_cluster_{rawClusterIndex:D3}",
+            ["raw_dbscan_cluster_index"] = rawClusterIndex,
+            ["building_detection_ids"] = SortedStringArray(buildingDetectionIds),
+            ["building_view_indices"] = SortedIntegerArray(buildingViewIndices),
+            ["core_hit_count"] = coreCluster.Count,
+            ["conflicting_core_hit_count"] = conflict.ConflictingCoreHitCount,
+            ["semantic_conflict_ratio"] = conflict.Ratio,
+            ["conflict_detection_ids"] = SortedStringArray(conflict.ConflictDetectionIds),
+            ["conflict_view_indices"] = SortedIntegerArray(conflict.ConflictViewIndices)
+        };
+    }
+
     private static bool TryBuildFeature(
         List<ClusterPoint> coreCluster,
         List<ClusterPoint> boundaryCluster,
@@ -584,6 +801,7 @@ public static class SurfaceHitPolygonExporter
         int featureIndex,
         MetricReference metricReference,
         Options options,
+        SemanticConflictAssessment conflict,
         out JObject feature)
     {
         feature = null;
@@ -636,7 +854,13 @@ public static class SurfaceHitPolygonExporter
                 ["core_hit_count"] = coreCluster.Count,
                 ["assigned_boundary_hit_count"] = boundaryCluster.Count,
                 ["occupied_grid_cell_count"] = occupiedCellCount,
-                ["polygon_vertex_count"] = polygon.Count
+                ["polygon_vertex_count"] = polygon.Count,
+                ["semantic_conflicting_core_hit_count"] = conflict.ConflictingCoreHitCount,
+                ["semantic_conflict_ratio"] = conflict.Ratio,
+                ["semantic_conflict_detection_ids"] =
+                    SortedStringArray(conflict.ConflictDetectionIds),
+                ["semantic_conflict_view_indices"] =
+                    SortedIntegerArray(conflict.ConflictViewIndices)
             },
             ["geometry"] = new JObject
             {
@@ -645,6 +869,20 @@ public static class SurfaceHitPolygonExporter
             }
         };
         return true;
+    }
+
+    private static JArray SortedStringArray(HashSet<string> values)
+    {
+        var sorted = new List<string>(values);
+        sorted.Sort(StringComparer.Ordinal);
+        return new JArray(sorted);
+    }
+
+    private static JArray SortedIntegerArray(HashSet<int> values)
+    {
+        var sorted = new List<int>(values);
+        sorted.Sort();
+        return new JArray(sorted);
     }
 
     private static void CollectProvenance(
@@ -1297,6 +1535,33 @@ public static class SurfaceHitPolygonExporter
         {
             Hit = hit;
             Geo = new GeoPoint(longitude, latitude);
+        }
+    }
+
+    private readonly struct SemanticConflictAssessment
+    {
+        public readonly int ConflictingCoreHitCount;
+        public readonly int CoreHitCount;
+        public readonly HashSet<string> ConflictDetectionIds;
+        public readonly HashSet<int> ConflictViewIndices;
+        public readonly bool ShouldReject;
+
+        public double Ratio => CoreHitCount > 0
+            ? ConflictingCoreHitCount / (double)CoreHitCount
+            : 0.0;
+
+        public SemanticConflictAssessment(
+            int conflictingCoreHitCount,
+            int coreHitCount,
+            HashSet<string> conflictDetectionIds,
+            HashSet<int> conflictViewIndices,
+            bool shouldReject)
+        {
+            ConflictingCoreHitCount = conflictingCoreHitCount;
+            CoreHitCount = coreHitCount;
+            ConflictDetectionIds = conflictDetectionIds;
+            ConflictViewIndices = conflictViewIndices;
+            ShouldReject = shouldReject;
         }
     }
 

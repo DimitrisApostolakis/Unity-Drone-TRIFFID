@@ -158,6 +158,19 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [Tooltip("Tolerance in metres used to simplify the extracted grid contour.")]
     [Min(0f)] [SerializeField] private float polygonSimplificationMeters = 0.5f;
 
+    [Header("Semantic Conflict Rejection")]
+    [Tooltip("Exclude candidate polygons whose core hits overlap strongly with another semantic class.")]
+    [SerializeField] private bool excludeSemanticConflicts = true;
+    [Tooltip("Comma-separated classes that contradict the polygon class, for example green_trees,tree,vegetation.")]
+    [SerializeField] private string semanticConflictClassFilters =
+        "green_trees,tree,vegetation";
+    [Tooltip("Maximum horizontal distance in metres for a building core hit to match contradictory evidence.")]
+    [Min(0.01f)] [SerializeField] private float semanticConflictDistanceMeters = 1.5f;
+    [Tooltip("Reject when at least this fraction of building core hits have nearby contradictory hits.")]
+    [Range(0f, 1f)] [SerializeField] private float semanticConflictRatioThreshold = 0.65f;
+    [Tooltip("Minimum number of conflicting building core hits required before rejection.")]
+    [Min(1)] [SerializeField] private int semanticConflictMinimumHits = 5;
+
     [Header("Source Video Dimensions")]
     [Tooltip("Use zero to infer the width from each mask. Set this when masks were resized.")]
     [Min(0)] [SerializeField] private int sourceFrameWidth;
@@ -540,7 +553,12 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             BoundaryAssignmentDistanceMeters = boundaryAssignmentDistanceMeters,
             GridCellSizeMeters = polygonGridCellSizeMeters,
             HitRadiusMeters = polygonHitRadiusMeters,
-            SimplificationToleranceMeters = polygonSimplificationMeters
+            SimplificationToleranceMeters = polygonSimplificationMeters,
+            ExcludeSemanticConflicts = excludeSemanticConflicts,
+            SemanticConflictClassFilters = semanticConflictClassFilters,
+            SemanticConflictDistanceMeters = semanticConflictDistanceMeters,
+            SemanticConflictRatioThreshold = semanticConflictRatioThreshold,
+            SemanticConflictMinimumHits = semanticConflictMinimumHits
         };
         if (!SurfaceHitPolygonExporter.TryExport(
                 surfaceHits,
@@ -561,7 +579,9 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             $"cluster(s) to '{lastPolygonOutputPath}'. Assigned " +
             $"{summary.AssignedBoundaryHitCount}/{summary.BoundaryHitCount} original-mask " +
             $"boundary hit(s), suppressed {summary.SuppressedClusterCount} secondary " +
-            $"cluster(s), and omitted {summary.NoiseHitCount} DBSCAN noise core hit(s) plus " +
+            $"cluster(s), rejected {summary.RejectedSemanticConflictCount} semantic " +
+            $"conflict(s) using {summary.SemanticConflictSourceHitCount} contradictory " +
+            $"core hit(s), and omitted {summary.NoiseHitCount} DBSCAN noise core hit(s) plus " +
             $"{summary.OmittedClusterCount} invalid contour(s).",
             this);
     }
