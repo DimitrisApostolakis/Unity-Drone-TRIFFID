@@ -5,6 +5,12 @@ using System.IO;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
+public enum SurfaceHitClusterAssociationMode
+{
+    DominantClusterPerDetection = 0,
+    AggregateClassMask = 1
+}
+
 /// <summary>
 /// Uses reliable eroded-mask hits to find object instances, then assigns raycasts from the
 /// original mask boundary to those instances and traces one metric occupancy contour per cluster.
@@ -25,6 +31,8 @@ public static class SurfaceHitPolygonExporter
         public float GridCellSizeMeters = 0.5f;
         public float HitRadiusMeters = 0.75f;
         public float SimplificationToleranceMeters = 0.5f;
+        public SurfaceHitClusterAssociationMode ClusterAssociationMode =
+            SurfaceHitClusterAssociationMode.DominantClusterPerDetection;
         public bool ExcludeSemanticConflicts = true;
         public string SemanticConflictClassFilters = "green_trees,tree,vegetation";
         public float SemanticConflictDistanceMeters = 1.5f;
@@ -136,25 +144,55 @@ public static class SurfaceHitPolygonExporter
                 out error);
         }
 
-        Dictionary<string, int> dominantClusterByDetection = FindDominantClustersByDetection(
-            corePoints, labels);
-        BuildDominantCoreClusters(
-            corePoints,
-            labels,
-            rawClusterCount,
-            dominantClusterByDetection,
-            out List<List<ClusterPoint>> coreClusters,
-            out bool[] retainedCorePoints,
-            out int suppressedClusterCount);
-        List<List<ClusterPoint>> boundaryClusters = AssignBoundaryPoints(
-            boundaryPoints,
-            corePoints,
-            labels,
-            retainedCorePoints,
-            coreClusters,
-            dominantClusterByDetection,
-            options.BoundaryAssignmentDistanceMeters,
-            out int assignedBoundaryHitCount);
+        List<List<ClusterPoint>> coreClusters;
+        bool[] retainedCorePoints;
+        int suppressedClusterCount;
+        List<List<ClusterPoint>> boundaryClusters;
+        int assignedBoundaryHitCount;
+        string clusteringMethod;
+        if (options.ClusterAssociationMode ==
+            SurfaceHitClusterAssociationMode.AggregateClassMask)
+        {
+            BuildAllCoreClusters(
+                corePoints,
+                labels,
+                rawClusterCount,
+                out coreClusters,
+                out retainedCorePoints);
+            suppressedClusterCount = 0;
+            boundaryClusters = AssignBoundaryPointsToNearestCluster(
+                boundaryPoints,
+                corePoints,
+                labels,
+                retainedCorePoints,
+                coreClusters,
+                options.BoundaryAssignmentDistanceMeters,
+                out assignedBoundaryHitCount);
+            clusteringMethod = "dbscan_all_class_hits_nearest_boundary_cluster";
+        }
+        else
+        {
+            Dictionary<string, int> dominantClusterByDetection =
+                FindDominantClustersByDetection(corePoints, labels);
+            BuildDominantCoreClusters(
+                corePoints,
+                labels,
+                rawClusterCount,
+                dominantClusterByDetection,
+                out coreClusters,
+                out retainedCorePoints,
+                out suppressedClusterCount);
+            boundaryClusters = AssignBoundaryPoints(
+                boundaryPoints,
+                corePoints,
+                labels,
+                retainedCorePoints,
+                coreClusters,
+                dominantClusterByDetection,
+                options.BoundaryAssignmentDistanceMeters,
+                out assignedBoundaryHitCount);
+            clusteringMethod = "dbscan_core_hits_dominant_detection_cluster";
+        }
 
         var features = new JArray();
         var rejectedSemanticConflicts = new JArray();
@@ -189,6 +227,7 @@ public static class SurfaceHitPolygonExporter
                     features.Count,
                     metricReference,
                     options,
+                    clusteringMethod,
                     conflict,
                     out JObject feature))
             {
@@ -202,7 +241,8 @@ public static class SurfaceHitPolygonExporter
         {
             ["provisional"] = true,
             ["class_filter"] = options.ClassFilter,
-            ["clustering_method"] = "dbscan_core_hits_dominant_detection_cluster",
+            ["cluster_association_mode"] = options.ClusterAssociationMode.ToString(),
+            ["clustering_method"] = clusteringMethod,
             ["polygon_method"] = "original_mask_boundary_metric_occupancy_contour",
             ["dbscan_epsilon_m"] = options.DbscanEpsilonMeters,
             ["dbscan_minimum_points"] = options.DbscanMinimumPoints,
@@ -566,6 +606,27 @@ public static class SurfaceHitPolygonExporter
         }
     }
 
+    private static void BuildAllCoreClusters(
+        List<ClusterPoint> corePoints,
+        int[] labels,
+        int clusterCount,
+        out List<List<ClusterPoint>> clusters,
+        out bool[] retainedPoints)
+    {
+        clusters = new List<List<ClusterPoint>>(clusterCount);
+        for (int clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++)
+            clusters.Add(new List<ClusterPoint>());
+        retainedPoints = new bool[corePoints.Count];
+        for (int i = 0; i < corePoints.Count; i++)
+        {
+            int label = labels[i];
+            if (label < 0)
+                continue;
+            retainedPoints[i] = true;
+            clusters[label].Add(corePoints[i]);
+        }
+    }
+
     private static List<List<ClusterPoint>> AssignBoundaryPoints(
         List<ClusterPoint> boundaryPoints,
         List<ClusterPoint> corePoints,
@@ -623,6 +684,62 @@ public static class SurfaceHitPolygonExporter
             if (nearestSquaredDistance > maximumSquaredDistance)
                 continue;
             assigned[targetCluster].Add(boundary);
+            assignedCount++;
+        }
+        return assigned;
+    }
+
+    private static List<List<ClusterPoint>> AssignBoundaryPointsToNearestCluster(
+        List<ClusterPoint> boundaryPoints,
+        List<ClusterPoint> corePoints,
+        int[] labels,
+        bool[] retainedCorePoints,
+        List<List<ClusterPoint>> coreClusters,
+        double maximumDistanceMeters,
+        out int assignedCount)
+    {
+        var assigned = new List<List<ClusterPoint>>(coreClusters.Count);
+        for (int i = 0; i < coreClusters.Count; i++)
+            assigned.Add(new List<ClusterPoint>());
+        assignedCount = 0;
+
+        Dictionary<GridKey, List<int>> grid = BuildSpatialGrid(
+            corePoints, maximumDistanceMeters, retainedCorePoints);
+        double maximumSquaredDistance = maximumDistanceMeters * maximumDistanceMeters;
+        for (int boundaryIndex = 0; boundaryIndex < boundaryPoints.Count; boundaryIndex++)
+        {
+            ClusterPoint boundary = boundaryPoints[boundaryIndex];
+            GridKey centre = GridKey.FromPoint(boundary, maximumDistanceMeters);
+            int nearestCluster = -1;
+            double nearestSquaredDistance = double.PositiveInfinity;
+            for (int xOffset = -1; xOffset <= 1; xOffset++)
+            {
+                for (int yOffset = -1; yOffset <= 1; yOffset++)
+                {
+                    var key = new GridKey(centre.X + xOffset, centre.Y + yOffset);
+                    if (!grid.TryGetValue(key, out List<int> candidates))
+                        continue;
+                    for (int i = 0; i < candidates.Count; i++)
+                    {
+                        int coreIndex = candidates[i];
+                        int cluster = labels[coreIndex];
+                        if (cluster < 0 || cluster >= coreClusters.Count)
+                            continue;
+                        double squaredDistance = SquaredDistance(
+                            boundary.EastMeters,
+                            boundary.NorthMeters,
+                            corePoints[coreIndex].EastMeters,
+                            corePoints[coreIndex].NorthMeters);
+                        if (squaredDistance >= nearestSquaredDistance)
+                            continue;
+                        nearestSquaredDistance = squaredDistance;
+                        nearestCluster = cluster;
+                    }
+                }
+            }
+            if (nearestCluster < 0 || nearestSquaredDistance > maximumSquaredDistance)
+                continue;
+            assigned[nearestCluster].Add(boundary);
             assignedCount++;
         }
         return assigned;
@@ -801,6 +918,7 @@ public static class SurfaceHitPolygonExporter
         int featureIndex,
         MetricReference metricReference,
         Options options,
+        string clusteringMethod,
         SemanticConflictAssessment conflict,
         out JObject feature)
     {
@@ -838,13 +956,17 @@ public static class SurfaceHitPolygonExporter
         feature = new JObject
         {
             ["type"] = "Feature",
-            ["id"] = $"{SanitizeId(options.ClassFilter)}_{featureIndex:D3}",
+            ["id"] = options.ClusterAssociationMode ==
+                     SurfaceHitClusterAssociationMode.AggregateClassMask
+                ? $"{SanitizeId(options.ClassFilter)}_cluster_{rawClusterIndex:D3}"
+                : $"{SanitizeId(options.ClassFilter)}_{featureIndex:D3}",
             ["properties"] = new JObject
             {
                 ["class"] = options.ClassFilter,
                 ["source"] = "mask_raycast_multiview",
                 ["provisional"] = true,
-                ["clustering_method"] = "dbscan_core_hits_dominant_detection_cluster",
+                ["cluster_association_mode"] = options.ClusterAssociationMode.ToString(),
+                ["clustering_method"] = clusteringMethod,
                 ["polygon_method"] = usedOccupancyContour
                     ? "original_mask_boundary_metric_occupancy_contour"
                     : "convex_hull_fallback",

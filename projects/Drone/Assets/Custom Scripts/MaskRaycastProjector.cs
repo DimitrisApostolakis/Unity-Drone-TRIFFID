@@ -115,6 +115,9 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     private static readonly Regex BatchMaskFileNameRegex = new Regex(
         @"^(?<class>.+)_view(?<view>\d+)_component(?<component>\d+)\.(?:png|jpe?g)$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex AggregateMaskFileNameRegex = new Regex(
+        @"^view_(?<view>\d+)_frame_(?<frame>\d+)_mask\.(?:png|jpe?g)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [Header("Projection Engine")]
     [SerializeField] private SrtDroneRaycastPlayer player;
@@ -125,11 +128,15 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [SerializeField] private List<MaskProjectionRequest> masks = new List<MaskProjectionRequest>();
 
     [Header("Batch Discovery And Report")]
-    [Tooltip("Primary folder containing CLASS_viewXX_componentYY PNG/JPG masks. Leave empty " +
+    [Tooltip("Primary folder containing component or aggregate PNG/JPG masks. Leave empty " +
              "to use the folder of the first configured mask.")]
     [SerializeField] private string batchMaskDirectory = string.Empty;
     [Tooltip("Optional extra mask folders, for example a separate green_trees output folder.")]
     [SerializeField] private List<string> additionalBatchMaskDirectories = new List<string>();
+    [Tooltip("Also discover view_XX_frame_XXXXXX_mask files as aggregate class masks.")]
+    [SerializeField] private bool discoverAggregateClassMasks = true;
+    [Tooltip("Class assigned to aggregate masks whose filenames do not contain a class name.")]
+    [SerializeField] private string aggregateMaskClassName = "building";
     [SerializeField] private List<MaskViewFrameMapping> viewFrameMappings =
         new List<MaskViewFrameMapping>
         {
@@ -145,6 +152,10 @@ public sealed class MaskRaycastProjector : MonoBehaviour
 
     [Header("Provisional Polygon Export")]
     [SerializeField] private string polygonClassFilter = "building";
+    [Tooltip("Dominant mode expects one instance per mask. Aggregate mode retains every DBSCAN " +
+             "cluster and assigns boundaries to the nearest cluster.")]
+    [SerializeField] private SurfaceHitClusterAssociationMode polygonClusterAssociationMode =
+        SurfaceHitClusterAssociationMode.DominantClusterPerDetection;
     [Tooltip("Maximum horizontal distance in metres between neighbouring DBSCAN hits.")]
     [Min(0.01f)] [SerializeField] private float dbscanEpsilonMeters = 2f;
     [Tooltip("Minimum number of neighbouring hits needed to form a dense DBSCAN region.")]
@@ -241,6 +252,8 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         }
 
         EnsureDefaultViewFrameMappings();
+        if (discoverAggregateClassMasks && string.IsNullOrWhiteSpace(aggregateMaskClassName))
+            return Fail("Aggregate mask class name is empty.", out error);
         var framesByView = new Dictionary<int, int>();
         for (int i = 0; i < viewFrameMappings.Count; i++)
         {
@@ -258,6 +271,8 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         var discoveredPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int ignoredImageCount = 0;
         int unmappedViewCount = 0;
+        int aggregateMaskCount = 0;
+        int aggregateFrameMismatchCount = 0;
         for (int directoryIndex = 0; directoryIndex < resolvedDirectories.Count; directoryIndex++)
         {
             string[] files = Directory.GetFiles(
@@ -268,28 +283,59 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                 if (!IsSupportedMaskImage(fileName))
                     continue;
 
-                Match match = BatchMaskFileNameRegex.Match(fileName);
-                if (!match.Success ||
-                    !int.TryParse(match.Groups["view"].Value, NumberStyles.None,
-                        CultureInfo.InvariantCulture, out int viewIndex) ||
-                    !int.TryParse(match.Groups["component"].Value, NumberStyles.None,
-                        CultureInfo.InvariantCulture, out int componentIndex))
+                string className;
+                int viewIndex;
+                int componentIndex;
+                int aggregateFrameIndex = -1;
+                bool isAggregateMask = false;
+                Match componentMatch = BatchMaskFileNameRegex.Match(fileName);
+                if (componentMatch.Success &&
+                    int.TryParse(componentMatch.Groups["view"].Value, NumberStyles.None,
+                        CultureInfo.InvariantCulture, out viewIndex) &&
+                    int.TryParse(componentMatch.Groups["component"].Value, NumberStyles.None,
+                        CultureInfo.InvariantCulture, out componentIndex))
                 {
-                    ignoredImageCount++;
-                    continue;
+                    className = componentMatch.Groups["class"].Value;
+                }
+                else
+                {
+                    Match aggregateMatch = AggregateMaskFileNameRegex.Match(fileName);
+                    if (!discoverAggregateClassMasks || !aggregateMatch.Success ||
+                        !int.TryParse(aggregateMatch.Groups["view"].Value, NumberStyles.None,
+                            CultureInfo.InvariantCulture, out viewIndex) ||
+                        !int.TryParse(aggregateMatch.Groups["frame"].Value, NumberStyles.None,
+                            CultureInfo.InvariantCulture, out aggregateFrameIndex))
+                    {
+                        ignoredImageCount++;
+                        continue;
+                    }
+                    className = aggregateMaskClassName.Trim();
+                    componentIndex = -1;
+                    isAggregateMask = true;
                 }
                 if (!framesByView.TryGetValue(viewIndex, out int frameIndex))
                 {
                     unmappedViewCount++;
                     continue;
                 }
+                if (isAggregateMask && aggregateFrameIndex != frameIndex)
+                {
+                    aggregateFrameMismatchCount++;
+                    continue;
+                }
 
                 string fullPath = Path.GetFullPath(files[fileIndex]);
                 if (!discoveredPaths.Add(fullPath))
                     continue;
-                string className = match.Groups["class"].Value;
+                if (isAggregateMask)
+                    aggregateMaskCount++;
                 discovered.Add(new DiscoveredMask(
-                    fullPath, className, viewIndex, frameIndex, componentIndex));
+                    fullPath,
+                    className,
+                    viewIndex,
+                    frameIndex,
+                    componentIndex,
+                    isAggregateMask));
             }
         }
 
@@ -303,7 +349,9 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                 maskPath = item.path.Replace('\\', '/'),
                 viewIndex = item.viewIndex,
                 frameIndex = item.frameIndex,
-                localDetectionId = Path.GetFileNameWithoutExtension(item.path),
+                localDetectionId = item.isAggregateMask
+                    ? $"{item.className}_view{item.viewIndex:D2}_aggregate"
+                    : Path.GetFileNameWithoutExtension(item.path),
                 className = item.className,
                 confidence = 1f
             });
@@ -312,8 +360,8 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         if (requests.Count == 0)
         {
             return Fail(
-                "No masks matching CLASS_viewXX_componentYY.png/.jpg/.jpeg and the " +
-                "configured views were found in the selected directories.",
+                "No component or aggregate masks matching the configured views were found " +
+                "in the selected directories.",
                 out error);
         }
 
@@ -327,9 +375,11 @@ public sealed class MaskRaycastProjector : MonoBehaviour
 #endif
         Debug.Log(
             $"[MaskRaycastProjector] Discovered {masks.Count} mask(s) from " +
-            $"{resolvedDirectories.Count} folder(s). Ignored {ignoredImageCount} " +
-            "unmatched image(s) and " +
-            $"{unmappedViewCount} mask(s) from unmapped view(s).",
+            $"{resolvedDirectories.Count} folder(s), including {aggregateMaskCount} aggregate " +
+            $"mask(s). Ignored {ignoredImageCount} unmatched image(s), " +
+            $"{unmappedViewCount} mask(s) from unmapped view(s), and " +
+            $"{aggregateFrameMismatchCount} aggregate mask(s) whose filename frame did not " +
+            "match the configured view mapping.",
             this);
         return true;
     }
@@ -554,6 +604,7 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             GridCellSizeMeters = polygonGridCellSizeMeters,
             HitRadiusMeters = polygonHitRadiusMeters,
             SimplificationToleranceMeters = polygonSimplificationMeters,
+            ClusterAssociationMode = polygonClusterAssociationMode,
             ExcludeSemanticConflicts = excludeSemanticConflicts,
             SemanticConflictClassFilters = semanticConflictClassFilters,
             SemanticConflictDistanceMeters = semanticConflictDistanceMeters,
@@ -573,9 +624,14 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         }
 
         lastPolygonOutputPath = outputPath;
+        string clusterDescription = polygonClusterAssociationMode ==
+                                    SurfaceHitClusterAssociationMode.AggregateClassMask
+            ? "aggregate"
+            : "dominant";
         Debug.Log(
             $"[MaskRaycastProjector] Exported {summary.ExportedPolygonCount} provisional " +
-            $"polygon(s) from {summary.ClusterCount} dominant '{polygonClassFilter}' " +
+            $"polygon(s) from {summary.ClusterCount} {clusterDescription} " +
+            $"'{polygonClassFilter}' " +
             $"cluster(s) to '{lastPolygonOutputPath}'. Assigned " +
             $"{summary.AssignedBoundaryHitCount}/{summary.BoundaryHitCount} original-mask " +
             $"boundary hit(s), suppressed {summary.SuppressedClusterCount} secondary " +
@@ -1269,15 +1325,22 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         public readonly int viewIndex;
         public readonly int frameIndex;
         public readonly int componentIndex;
+        public readonly bool isAggregateMask;
 
         public DiscoveredMask(
-            string path, string className, int viewIndex, int frameIndex, int componentIndex)
+            string path,
+            string className,
+            int viewIndex,
+            int frameIndex,
+            int componentIndex,
+            bool isAggregateMask)
         {
             this.path = path;
             this.className = className;
             this.viewIndex = viewIndex;
             this.frameIndex = frameIndex;
             this.componentIndex = componentIndex;
+            this.isAggregateMask = isAggregateMask;
         }
 
         public static int Compare(DiscoveredMask left, DiscoveredMask right)

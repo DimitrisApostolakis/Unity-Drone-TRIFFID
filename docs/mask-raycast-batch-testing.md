@@ -13,6 +13,14 @@ CLASS_viewXX_componentYY.jpg
 CLASS_viewXX_componentYY.jpeg
 ```
 
+Combined semantic masks are also accepted when **Discover Aggregate Class Masks** is enabled:
+
+```text
+view_XX_frame_XXXXXX_mask.png
+```
+
+Because this name does not contain a class, **Aggregate Mask Class Name** supplies it.
+
 PNG is recommended for binary masks because it is lossless. JPEG is accepted, but compression
 artefacts near mask boundaries can produce extra foreground pixels.
 
@@ -43,12 +51,16 @@ These values remain editable in the component's **View Frame Mappings** list.
 The projection retains every raw surface hit. It does not reject hits using depth smoothness or
 class-specific geometry assumptions.
 
-## Split combined FSS-SAM3 masks
+## Combined FSS-SAM3 masks
 
-`MaskRaycastProjector` expects one detection component per file. A combined FSS-SAM3 file such as
-`view_00_frame_000000_mask.png` may contain many disconnected buildings, so renaming the complete
-image to one `component00` file would make all of them share one detection ID. The dominant-cluster
-stage could then suppress valid buildings.
+Use the four original FSS-SAM3 files directly. Set **Batch Mask Directory** to their folder, enable
+**Discover Aggregate Class Masks**, set **Aggregate Mask Class Name** to `building`, and choose
+**Aggregate Class Mask** under **Polygon Cluster Association Mode**. In this mode every valid
+DBSCAN cluster is retained and original-boundary hits are assigned to the nearest cluster, even
+when several buildings came from one semantic mask.
+
+The earlier connected-component splitter remains available for models whose output already has
+well-separated instances. It is not required for aggregate mode. Run it with:
 
 From the repository root, split all four combined masks with:
 
@@ -59,10 +71,9 @@ py tools\split_semantic_mask_components.py `
 ```
 
 The script uses 8-connected components and writes full-resolution binary PNGs to the `components`
-subfolder with names such as `building_view00_component00.png`. The default **Min Pixels** value is
-one, so it does not discard small structures such as kiosks. Set **Batch Mask Directory** to the
-generated `components` folder, keep the tree folder under **Additional Batch Mask Directories**,
-and run discovery again.
+subfolder with names such as `building_view00_component00.png`. Its default **Min Pixels** value is
+one, so it does not discard small structures such as kiosks. Use **Dominant Cluster Per Detection**
+only when those generated components genuinely correspond to separate objects.
 
 The script requires Pillow, NumPy, and SciPy. Install them in the Python environment used to run
 the command if they are not already available:
@@ -107,10 +118,10 @@ The exporter then:
 1. selects hits whose class matches **Polygon Class Filter** and converts them to a local
    east/north plane measured in metres;
 2. applies DBSCAN only to core hits;
-3. retains the dominant core cluster of every connected mask component, suppressing small
-   satellite clusters caused by rays landing on unrelated surfaces;
-4. assigns original-mask boundary hits only to the dominant cluster of the same detection and
-   only when they are within **Boundary Assignment Distance Meters**; and
+3. either retains the dominant cluster of every instance mask or, in **Aggregate Class Mask**
+   mode, retains every DBSCAN cluster;
+4. assigns original-mask boundary hits to the dominant same-detection cluster in instance mode,
+   or to the nearest cluster in aggregate mode, within **Boundary Assignment Distance Meters**; and
 5. splats accepted hits into a metric occupancy grid, traces its largest exterior ring, and
    simplifies the contour before converting it to WGS84.
 
@@ -122,6 +133,8 @@ only as a fallback when a valid grid contour cannot be traced.
 The default settings are deliberately provisional:
 
 - **Polygon Class Filter:** `building`
+- **Polygon Cluster Association Mode:** `Dominant Cluster Per Detection` for instance masks;
+  switch to `Aggregate Class Mask` for combined semantic masks
 - **Dbscan Epsilon Meters:** `2`
 - **Dbscan Minimum Points:** `5`
 - **Boundary Assignment Distance Meters:** `4`
