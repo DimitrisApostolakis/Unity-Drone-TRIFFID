@@ -17,9 +17,13 @@ Combined semantic masks are also accepted when **Discover Aggregate Class Masks*
 
 ```text
 view_XX_frame_XXXXXX_mask.png
+PREFIX_view_XX_frame_XXXXXX_mask.png
 ```
 
-Because this name does not contain a class, **Aggregate Mask Class Name** supplies it.
+For the unprefixed form, **Aggregate Mask Class Name** supplies the class. For a prefixed aggregate
+file inside `CLASS\masks`, the parent folder supplies the class. For example,
+`green_trees\masks\g_view_00_frame_000000_mask.png` becomes
+`green_trees_view00_aggregate`.
 
 PNG is recommended for binary masks because it is lossless. JPEG is accepted, but compression
 artefacts near mask boundaries can produce extra foreground pixels.

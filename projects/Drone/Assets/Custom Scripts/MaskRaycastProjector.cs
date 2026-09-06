@@ -116,7 +116,7 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         @"^(?<class>.+)_view(?<view>\d+)_component(?<component>\d+)\.(?:png|jpe?g)$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex AggregateMaskFileNameRegex = new Regex(
-        @"^view_(?<view>\d+)_frame_(?<frame>\d+)_mask\.(?:png|jpe?g)$",
+        @"^(?:(?<prefix>.+)_)?view_(?<view>\d+)_frame_(?<frame>\d+)_mask\.(?:png|jpe?g)$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [Header("Projection Engine")]
@@ -133,7 +133,8 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [SerializeField] private string batchMaskDirectory = string.Empty;
     [Tooltip("Optional extra mask folders, for example a separate green_trees output folder.")]
     [SerializeField] private List<string> additionalBatchMaskDirectories = new List<string>();
-    [Tooltip("Also discover view_XX_frame_XXXXXX_mask files as aggregate class masks.")]
+    [Tooltip("Also discover view_XX_frame_XXXXXX_mask files and prefixed variants such as " +
+             "g_view_XX_frame_XXXXXX_mask as aggregate class masks.")]
     [SerializeField] private bool discoverAggregateClassMasks = true;
     [Tooltip("Class assigned to aggregate masks whose filenames do not contain a class name.")]
     [SerializeField] private string aggregateMaskClassName = "building";
@@ -321,7 +322,12 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                         ignoredImageCount++;
                         continue;
                     }
-                    className = aggregateMaskClassName.Trim();
+                    string aggregatePrefix = aggregateMatch.Groups["prefix"].Value;
+                    className = string.IsNullOrWhiteSpace(aggregatePrefix)
+                        ? aggregateMaskClassName.Trim()
+                        : InferAggregateClassNameFromDirectory(
+                            resolvedDirectories[directoryIndex],
+                            aggregateMaskClassName);
                     componentIndex = -1;
                     isAggregateMask = true;
                 }
@@ -1335,6 +1341,19 @@ public sealed class MaskRaycastProjector : MonoBehaviour
         return string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(extension, ".jpg", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string InferAggregateClassNameFromDirectory(
+        string maskDirectory, string fallbackClassName)
+    {
+        var directory = new DirectoryInfo(maskDirectory);
+        if (string.Equals(directory.Name, "masks", StringComparison.OrdinalIgnoreCase) &&
+            directory.Parent != null &&
+            !string.IsNullOrWhiteSpace(directory.Parent.Name))
+        {
+            return directory.Parent.Name;
+        }
+        return fallbackClassName.Trim();
     }
 
     private static bool Fail(string message, out string error)
