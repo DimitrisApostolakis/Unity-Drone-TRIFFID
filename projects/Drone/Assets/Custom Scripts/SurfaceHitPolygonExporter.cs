@@ -38,6 +38,12 @@ public static class SurfaceHitPolygonExporter
         public float ConsensusOverlapToleranceMeters = 1.25f;
         public int ConsensusMinimumSupportingViews = 2;
         public float ConsensusSingleViewExpansionDistanceMeters = 1.5f;
+        public bool ConsensusSemanticCarvingEnabled = true;
+        public float ConsensusSemanticVetoDistanceMeters = 1f;
+        public int ConsensusSemanticVetoMinimumViews = 2;
+        public float ConsensusFragmentMergeDistanceMeters = 1f;
+        public int ConsensusFragmentMinimumSharedViews = 1;
+        public bool ConsensusBlockMergeAcrossSemanticVeto = true;
         public bool ExcludeSemanticConflicts = true;
         public string SemanticConflictClassFilters = "green_trees,tree,vegetation";
         public float SemanticConflictDistanceMeters = 1.5f;
@@ -59,6 +65,12 @@ public static class SurfaceHitPolygonExporter
         public readonly int ConsensusAvailableViewCount;
         public readonly int ConsensusConfirmedCellCount;
         public readonly int ConsensusExpandedCoreHitCount;
+        public readonly int ConsensusSemanticVetoCellCount;
+        public readonly int ConsensusCarvedConfirmedCellCount;
+        public readonly int ConsensusCarvedCoreHitCount;
+        public readonly int ConsensusCarvedBoundaryHitCount;
+        public readonly int ConsensusProvisionalClusterCount;
+        public readonly int ConsensusFragmentMergeCount;
         public readonly int ExportedPolygonCount;
         public readonly int OmittedClusterCount;
 
@@ -75,6 +87,12 @@ public static class SurfaceHitPolygonExporter
             int consensusAvailableViewCount,
             int consensusConfirmedCellCount,
             int consensusExpandedCoreHitCount,
+            int consensusSemanticVetoCellCount,
+            int consensusCarvedConfirmedCellCount,
+            int consensusCarvedCoreHitCount,
+            int consensusCarvedBoundaryHitCount,
+            int consensusProvisionalClusterCount,
+            int consensusFragmentMergeCount,
             int exportedPolygonCount,
             int omittedClusterCount)
         {
@@ -90,6 +108,12 @@ public static class SurfaceHitPolygonExporter
             ConsensusAvailableViewCount = consensusAvailableViewCount;
             ConsensusConfirmedCellCount = consensusConfirmedCellCount;
             ConsensusExpandedCoreHitCount = consensusExpandedCoreHitCount;
+            ConsensusSemanticVetoCellCount = consensusSemanticVetoCellCount;
+            ConsensusCarvedConfirmedCellCount = consensusCarvedConfirmedCellCount;
+            ConsensusCarvedCoreHitCount = consensusCarvedCoreHitCount;
+            ConsensusCarvedBoundaryHitCount = consensusCarvedBoundaryHitCount;
+            ConsensusProvisionalClusterCount = consensusProvisionalClusterCount;
+            ConsensusFragmentMergeCount = consensusFragmentMergeCount;
             ExportedPolygonCount = exportedPolygonCount;
             OmittedClusterCount = omittedClusterCount;
         }
@@ -156,12 +180,20 @@ public static class SurfaceHitPolygonExporter
         int consensusAvailableViewCount = 0;
         int consensusConfirmedCellCount = 0;
         int consensusExpandedCoreHitCount = 0;
+        int consensusSemanticVetoCellCount = 0;
+        int consensusCarvedConfirmedCellCount = 0;
+        int consensusCarvedCoreHitCount = 0;
+        int consensusCarvedBoundaryHitCount = 0;
+        int consensusProvisionalClusterCount = 0;
+        int consensusFragmentMergeCount = 0;
+        HashSet<GridKey> consensusSemanticVetoCells = null;
         List<ClusterConsensusStats> consensusStats = null;
         if (options.ClusterAssociationMode ==
             SurfaceHitClusterAssociationMode.MultiViewConsensus)
         {
             BuildMultiViewConsensusClusters(
                 corePoints,
+                semanticConflictPoints,
                 options,
                 out coreClusters,
                 out labels,
@@ -170,6 +202,12 @@ public static class SurfaceHitPolygonExporter
                 out consensusAvailableViewCount,
                 out consensusConfirmedCellCount,
                 out consensusExpandedCoreHitCount,
+                out consensusSemanticVetoCells,
+                out consensusSemanticVetoCellCount,
+                out consensusCarvedConfirmedCellCount,
+                out consensusCarvedCoreHitCount,
+                out consensusProvisionalClusterCount,
+                out consensusFragmentMergeCount,
                 out noiseHitCount);
             rawClusterCount = coreClusters.Count;
             if (rawClusterCount == 0)
@@ -189,8 +227,13 @@ public static class SurfaceHitPolygonExporter
                 retainedCorePoints,
                 coreClusters,
                 options.BoundaryAssignmentDistanceMeters,
-                out assignedBoundaryHitCount);
-            clusteringMethod = "multi_view_consensus_grid_connected_components";
+                consensusSemanticVetoCells,
+                options.ConsensusGridCellSizeMeters,
+                options.ConsensusSemanticVetoDistanceMeters,
+                out assignedBoundaryHitCount,
+                out consensusCarvedBoundaryHitCount);
+            clusteringMethod =
+                "multi_view_consensus_semantic_carving_connected_components_fragment_merge";
         }
         else
         {
@@ -321,6 +364,25 @@ public static class SurfaceHitPolygonExporter
             ["consensus_available_view_count"] = consensusAvailableViewCount,
             ["consensus_confirmed_cell_count"] = consensusConfirmedCellCount,
             ["consensus_expanded_core_hit_count"] = consensusExpandedCoreHitCount,
+            ["consensus_semantic_carving_enabled"] =
+                options.ConsensusSemanticCarvingEnabled,
+            ["consensus_semantic_veto_distance_m"] =
+                options.ConsensusSemanticVetoDistanceMeters,
+            ["consensus_semantic_veto_minimum_views"] =
+                options.ConsensusSemanticVetoMinimumViews,
+            ["consensus_semantic_veto_cell_count"] = consensusSemanticVetoCellCount,
+            ["consensus_carved_confirmed_cell_count"] =
+                consensusCarvedConfirmedCellCount,
+            ["consensus_carved_core_hit_count"] = consensusCarvedCoreHitCount,
+            ["consensus_carved_boundary_hit_count"] = consensusCarvedBoundaryHitCount,
+            ["consensus_fragment_merge_distance_m"] =
+                options.ConsensusFragmentMergeDistanceMeters,
+            ["consensus_fragment_minimum_shared_views"] =
+                options.ConsensusFragmentMinimumSharedViews,
+            ["consensus_block_merge_across_semantic_veto"] =
+                options.ConsensusBlockMergeAcrossSemanticVeto,
+            ["consensus_provisional_cluster_count"] = consensusProvisionalClusterCount,
+            ["consensus_fragment_merge_count"] = consensusFragmentMergeCount,
             ["consensus_unassigned_core_hit_count"] =
                 options.ClusterAssociationMode ==
                 SurfaceHitClusterAssociationMode.MultiViewConsensus
@@ -384,6 +446,12 @@ public static class SurfaceHitPolygonExporter
             consensusAvailableViewCount,
             consensusConfirmedCellCount,
             consensusExpandedCoreHitCount,
+            consensusSemanticVetoCellCount,
+            consensusCarvedConfirmedCellCount,
+            consensusCarvedCoreHitCount,
+            consensusCarvedBoundaryHitCount,
+            consensusProvisionalClusterCount,
+            consensusFragmentMergeCount,
             features.Count,
             omittedCount);
         return true;
@@ -427,6 +495,18 @@ public static class SurfaceHitPolygonExporter
         {
             return Fail(
                 "Consensus single-view expansion distance cannot be negative.",
+                out error);
+        }
+        if (options.ConsensusSemanticVetoDistanceMeters < 0f)
+            return Fail("Consensus semantic veto distance cannot be negative.", out error);
+        if (options.ConsensusSemanticVetoMinimumViews < 1)
+            return Fail("Consensus semantic veto minimum views must be at least one.", out error);
+        if (options.ConsensusFragmentMergeDistanceMeters < 0f)
+            return Fail("Consensus fragment merge distance cannot be negative.", out error);
+        if (options.ConsensusFragmentMinimumSharedViews < 1)
+        {
+            return Fail(
+                "Consensus fragment minimum shared views must be at least one.",
                 out error);
         }
         if (options.SemanticConflictDistanceMeters <= 0f)
@@ -730,6 +810,7 @@ public static class SurfaceHitPolygonExporter
 
     private static void BuildMultiViewConsensusClusters(
         List<ClusterPoint> corePoints,
+        List<ClusterPoint> semanticConflictPoints,
         Options options,
         out List<List<ClusterPoint>> clusters,
         out int[] labels,
@@ -738,9 +819,19 @@ public static class SurfaceHitPolygonExporter
         out int availableViewCount,
         out int confirmedCellCount,
         out int expandedCoreHitCount,
+        out HashSet<GridKey> semanticVetoCells,
+        out int semanticVetoCellCount,
+        out int carvedConfirmedCellCount,
+        out int carvedCoreHitCount,
+        out int provisionalClusterCount,
+        out int fragmentMergeCount,
         out int unassignedCoreHitCount)
     {
         double cellSize = options.ConsensusGridCellSizeMeters;
+        semanticVetoCells = options.ConsensusSemanticCarvingEnabled
+            ? BuildSemanticVetoCells(semanticConflictPoints, options, cellSize)
+            : new HashSet<GridKey>();
+        semanticVetoCellCount = semanticVetoCells.Count;
         var pointIndicesByCell = new Dictionary<GridKey, List<int>>();
         var occupiedCellsByView = new Dictionary<int, HashSet<GridKey>>();
         for (int pointIndex = 0; pointIndex < corePoints.Count; pointIndex++)
@@ -769,6 +860,7 @@ public static class SurfaceHitPolygonExporter
         double overlapSquared = options.ConsensusOverlapToleranceMeters *
                                 options.ConsensusOverlapToleranceMeters;
         var supportViewsByCell = new Dictionary<GridKey, HashSet<int>>();
+        carvedConfirmedCellCount = 0;
         foreach (GridKey candidateCell in pointIndicesByCell.Keys)
         {
             var supportingViews = new HashSet<int>();
@@ -800,8 +892,18 @@ public static class SurfaceHitPolygonExporter
                 if (supportsCell)
                     supportingViews.Add(view.Key);
             }
-            if (supportingViews.Count >= options.ConsensusMinimumSupportingViews)
-                supportViewsByCell.Add(candidateCell, supportingViews);
+            if (supportingViews.Count < options.ConsensusMinimumSupportingViews)
+                continue;
+            if (IsCellNearAny(
+                    candidateCell,
+                    semanticVetoCells,
+                    cellSize,
+                    options.ConsensusSemanticVetoDistanceMeters))
+            {
+                carvedConfirmedCellCount++;
+                continue;
+            }
+            supportViewsByCell.Add(candidateCell, supportingViews);
         }
         confirmedCellCount = supportViewsByCell.Count;
 
@@ -810,9 +912,7 @@ public static class SurfaceHitPolygonExporter
         var clusterByConfirmedCell = new Dictionary<GridKey, int>();
         clusters = new List<List<ClusterPoint>>();
         clusterStats = new List<ClusterConsensusStats>();
-        double connectionDistance = Math.Max(
-            options.ConsensusOverlapToleranceMeters,
-            cellSize * Math.Sqrt(2.0));
+        double connectionDistance = cellSize * Math.Sqrt(2.0);
         double connectionSquared = connectionDistance * connectionDistance;
         int connectionRadiusCells = Math.Max(
             1,
@@ -871,12 +971,24 @@ public static class SurfaceHitPolygonExporter
             }
         }
 
+        provisionalClusterCount = clusters.Count;
+        fragmentMergeCount = MergeConsensusFragments(
+            orderedConfirmedCells,
+            supportViewsByCell,
+            clusterByConfirmedCell,
+            semanticVetoCells,
+            cellSize,
+            options,
+            ref clusters,
+            ref clusterStats);
+
         labels = new int[corePoints.Count];
         retainedPoints = new bool[corePoints.Count];
         for (int i = 0; i < labels.Length; i++)
             labels[i] = Noise;
 
         expandedCoreHitCount = 0;
+        carvedCoreHitCount = 0;
         double expansionDistance = options.ConsensusSingleViewExpansionDistanceMeters;
         double expansionSquared = expansionDistance * expansionDistance;
         int expansionRadiusCells = (int)Math.Ceiling(expansionDistance / cellSize);
@@ -884,6 +996,15 @@ public static class SurfaceHitPolygonExporter
         {
             ClusterPoint point = corePoints[pointIndex];
             GridKey pointCell = GridKey.FromPoint(point, cellSize);
+            if (IsCellNearAny(
+                    pointCell,
+                    semanticVetoCells,
+                    cellSize,
+                    options.ConsensusSemanticVetoDistanceMeters))
+            {
+                carvedCoreHitCount++;
+                continue;
+            }
             bool isConfirmedCell = clusterByConfirmedCell.TryGetValue(
                 pointCell, out int targetCluster);
             if (!isConfirmedCell)
@@ -918,6 +1039,217 @@ public static class SurfaceHitPolygonExporter
         {
             if (!retainedPoints[i])
                 unassignedCoreHitCount++;
+        }
+    }
+
+    private static HashSet<GridKey> BuildSemanticVetoCells(
+        List<ClusterPoint> semanticConflictPoints,
+        Options options,
+        double cellSize)
+    {
+        var occupiedCellsByView = new Dictionary<int, HashSet<GridKey>>();
+        var candidateCells = new HashSet<GridKey>();
+        for (int i = 0; i < semanticConflictPoints.Count; i++)
+        {
+            ClusterPoint point = semanticConflictPoints[i];
+            GridKey cell = GridKey.FromPoint(point, cellSize);
+            candidateCells.Add(cell);
+            int viewIndex = point.Hit.ViewIndex;
+            if (!occupiedCellsByView.TryGetValue(viewIndex, out HashSet<GridKey> viewCells))
+            {
+                viewCells = new HashSet<GridKey>();
+                occupiedCellsByView.Add(viewIndex, viewCells);
+            }
+            viewCells.Add(cell);
+        }
+
+        var vetoCells = new HashSet<GridKey>();
+        foreach (GridKey candidateCell in candidateCells)
+        {
+            int supportingViews = 0;
+            foreach (HashSet<GridKey> viewCells in occupiedCellsByView.Values)
+            {
+                if (!IsCellNearAny(
+                        candidateCell,
+                        viewCells,
+                        cellSize,
+                        options.ConsensusSemanticVetoDistanceMeters))
+                {
+                    continue;
+                }
+                supportingViews++;
+                if (supportingViews >= options.ConsensusSemanticVetoMinimumViews)
+                {
+                    vetoCells.Add(candidateCell);
+                    break;
+                }
+            }
+        }
+        return vetoCells;
+    }
+
+    private static int MergeConsensusFragments(
+        List<GridKey> orderedConfirmedCells,
+        Dictionary<GridKey, HashSet<int>> supportViewsByCell,
+        Dictionary<GridKey, int> clusterByConfirmedCell,
+        HashSet<GridKey> semanticVetoCells,
+        double cellSize,
+        Options options,
+        ref List<List<ClusterPoint>> clusters,
+        ref List<ClusterConsensusStats> clusterStats)
+    {
+        int provisionalClusterCount = clusters.Count;
+        double mergeDistance = options.ConsensusFragmentMergeDistanceMeters;
+        if (provisionalClusterCount < 2 || mergeDistance <= 0.0)
+            return 0;
+
+        var unionFind = new UnionFind(provisionalClusterCount);
+        double mergeSquared = mergeDistance * mergeDistance;
+        int radiusCells = (int)Math.Ceiling(mergeDistance / cellSize);
+        for (int cellIndex = 0; cellIndex < orderedConfirmedCells.Count; cellIndex++)
+        {
+            GridKey cell = orderedConfirmedCells[cellIndex];
+            int sourceCluster = clusterByConfirmedCell[cell];
+            for (int xOffset = -radiusCells; xOffset <= radiusCells; xOffset++)
+            {
+                for (int yOffset = -radiusCells; yOffset <= radiusCells; yOffset++)
+                {
+                    if (xOffset == 0 && yOffset == 0)
+                        continue;
+                    double eastOffset = xOffset * cellSize;
+                    double northOffset = yOffset * cellSize;
+                    if (eastOffset * eastOffset + northOffset * northOffset > mergeSquared)
+                        continue;
+
+                    var neighbour = new GridKey(cell.X + xOffset, cell.Y + yOffset);
+                    if (CompareGridKeys(cell, neighbour) >= 0 ||
+                        !clusterByConfirmedCell.TryGetValue(
+                            neighbour, out int targetCluster) ||
+                        sourceCluster == targetCluster)
+                    {
+                        continue;
+                    }
+                    if (CountSharedViews(
+                            clusterStats[sourceCluster].SupportingViews,
+                            clusterStats[targetCluster].SupportingViews) <
+                        options.ConsensusFragmentMinimumSharedViews)
+                    {
+                        continue;
+                    }
+                    if (options.ConsensusBlockMergeAcrossSemanticVeto &&
+                        IsGridLineBlocked(cell, neighbour, semanticVetoCells))
+                    {
+                        continue;
+                    }
+                    unionFind.Union(sourceCluster, targetCluster);
+                }
+            }
+        }
+
+        var rootToMergedCluster = new Dictionary<int, int>();
+        var mergedClusterByCell = new Dictionary<GridKey, int>();
+        var mergedClusters = new List<List<ClusterPoint>>();
+        var mergedStats = new List<ClusterConsensusStats>();
+        for (int i = 0; i < orderedConfirmedCells.Count; i++)
+        {
+            GridKey cell = orderedConfirmedCells[i];
+            int root = unionFind.Find(clusterByConfirmedCell[cell]);
+            if (!rootToMergedCluster.TryGetValue(root, out int mergedCluster))
+            {
+                mergedCluster = mergedClusters.Count;
+                rootToMergedCluster.Add(root, mergedCluster);
+                mergedClusters.Add(new List<ClusterPoint>());
+                mergedStats.Add(new ClusterConsensusStats());
+            }
+            mergedClusterByCell.Add(cell, mergedCluster);
+            ClusterConsensusStats stats = mergedStats[mergedCluster];
+            HashSet<int> supportingViews = supportViewsByCell[cell];
+            stats.ConfirmedCellCount++;
+            stats.MaximumViewSupport = Math.Max(
+                stats.MaximumViewSupport, supportingViews.Count);
+            stats.SupportingViews.UnionWith(supportingViews);
+        }
+
+        clusterByConfirmedCell.Clear();
+        foreach (KeyValuePair<GridKey, int> pair in mergedClusterByCell)
+            clusterByConfirmedCell.Add(pair.Key, pair.Value);
+        clusters = mergedClusters;
+        clusterStats = mergedStats;
+        return provisionalClusterCount - mergedClusters.Count;
+    }
+
+    private static int CountSharedViews(HashSet<int> left, HashSet<int> right)
+    {
+        HashSet<int> smaller = left.Count <= right.Count ? left : right;
+        HashSet<int> larger = ReferenceEquals(smaller, left) ? right : left;
+        int count = 0;
+        foreach (int viewIndex in smaller)
+        {
+            if (larger.Contains(viewIndex))
+                count++;
+        }
+        return count;
+    }
+
+    private static bool IsCellNearAny(
+        GridKey cell,
+        HashSet<GridKey> candidates,
+        double cellSize,
+        double maximumDistanceMeters)
+    {
+        if (candidates == null || candidates.Count == 0)
+            return false;
+        int radiusCells = (int)Math.Ceiling(maximumDistanceMeters / cellSize);
+        double maximumSquared = maximumDistanceMeters * maximumDistanceMeters;
+        for (int xOffset = -radiusCells; xOffset <= radiusCells; xOffset++)
+        {
+            for (int yOffset = -radiusCells; yOffset <= radiusCells; yOffset++)
+            {
+                double eastOffset = xOffset * cellSize;
+                double northOffset = yOffset * cellSize;
+                if (eastOffset * eastOffset + northOffset * northOffset > maximumSquared)
+                    continue;
+                if (candidates.Contains(new GridKey(
+                        cell.X + xOffset, cell.Y + yOffset)))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static bool IsGridLineBlocked(
+        GridKey start,
+        GridKey end,
+        HashSet<GridKey> blockedCells)
+    {
+        if (blockedCells == null || blockedCells.Count == 0)
+            return false;
+        int x = start.X;
+        int y = start.Y;
+        int deltaX = Math.Abs(end.X - start.X);
+        int stepX = start.X < end.X ? 1 : -1;
+        int deltaY = -Math.Abs(end.Y - start.Y);
+        int stepY = start.Y < end.Y ? 1 : -1;
+        int error = deltaX + deltaY;
+        while (true)
+        {
+            if (blockedCells.Contains(new GridKey(x, y)))
+                return true;
+            if (x == end.X && y == end.Y)
+                return false;
+            int doubledError = 2 * error;
+            if (doubledError >= deltaY)
+            {
+                error += deltaY;
+                x += stepX;
+            }
+            if (doubledError <= deltaX)
+            {
+                error += deltaX;
+                y += stepY;
+            }
         }
     }
 
@@ -1039,10 +1371,38 @@ public static class SurfaceHitPolygonExporter
         double maximumDistanceMeters,
         out int assignedCount)
     {
+        return AssignBoundaryPointsToNearestCluster(
+            boundaryPoints,
+            corePoints,
+            labels,
+            retainedCorePoints,
+            coreClusters,
+            maximumDistanceMeters,
+            null,
+            1.0,
+            0.0,
+            out assignedCount,
+            out _);
+    }
+
+    private static List<List<ClusterPoint>> AssignBoundaryPointsToNearestCluster(
+        List<ClusterPoint> boundaryPoints,
+        List<ClusterPoint> corePoints,
+        int[] labels,
+        bool[] retainedCorePoints,
+        List<List<ClusterPoint>> coreClusters,
+        double maximumDistanceMeters,
+        HashSet<GridKey> excludedCells,
+        double excludedCellSizeMeters,
+        double excludedDistanceMeters,
+        out int assignedCount,
+        out int excludedCount)
+    {
         var assigned = new List<List<ClusterPoint>>(coreClusters.Count);
         for (int i = 0; i < coreClusters.Count; i++)
             assigned.Add(new List<ClusterPoint>());
         assignedCount = 0;
+        excludedCount = 0;
 
         Dictionary<GridKey, List<int>> grid = BuildSpatialGrid(
             corePoints, maximumDistanceMeters, retainedCorePoints);
@@ -1050,6 +1410,15 @@ public static class SurfaceHitPolygonExporter
         for (int boundaryIndex = 0; boundaryIndex < boundaryPoints.Count; boundaryIndex++)
         {
             ClusterPoint boundary = boundaryPoints[boundaryIndex];
+            if (IsCellNearAny(
+                    GridKey.FromPoint(boundary, excludedCellSizeMeters),
+                    excludedCells,
+                    excludedCellSizeMeters,
+                    excludedDistanceMeters))
+            {
+                excludedCount++;
+                continue;
+            }
             GridKey centre = GridKey.FromPoint(boundary, maximumDistanceMeters);
             int nearestCluster = -1;
             double nearestSquaredDistance = double.PositiveInfinity;
@@ -2021,6 +2390,50 @@ public static class SurfaceHitPolygonExporter
         public int ConfirmedCellCount;
         public int MaximumViewSupport;
         public int ExpandedCoreHitCount;
+    }
+
+    private sealed class UnionFind
+    {
+        private readonly int[] parent;
+        private readonly byte[] rank;
+
+        public UnionFind(int count)
+        {
+            parent = new int[count];
+            rank = new byte[count];
+            for (int i = 0; i < count; i++)
+                parent[i] = i;
+        }
+
+        public int Find(int value)
+        {
+            int root = value;
+            while (parent[root] != root)
+                root = parent[root];
+            while (parent[value] != value)
+            {
+                int next = parent[value];
+                parent[value] = root;
+                value = next;
+            }
+            return root;
+        }
+
+        public void Union(int left, int right)
+        {
+            int leftRoot = Find(left);
+            int rightRoot = Find(right);
+            if (leftRoot == rightRoot)
+                return;
+            if (rank[leftRoot] < rank[rightRoot])
+            {
+                parent[leftRoot] = rightRoot;
+                return;
+            }
+            parent[rightRoot] = leftRoot;
+            if (rank[leftRoot] == rank[rightRoot])
+                rank[leftRoot]++;
+        }
     }
 
     private readonly struct SemanticConflictAssessment

@@ -167,6 +167,18 @@ public sealed class MaskRaycastProjector : MonoBehaviour
     [Min(2)] [SerializeField] private int consensusMinimumSupportingViews = 2;
     [Tooltip("Attach nearby single-view core hits to a confirmed multi-view building core.")]
     [Min(0f)] [SerializeField] private float consensusSingleViewExpansionDistanceMeters = 1.5f;
+    [Tooltip("Remove confirmed building cells that overlap contradictory multi-view semantics before clustering.")]
+    [SerializeField] private bool consensusSemanticCarvingEnabled = true;
+    [Tooltip("Distance around a multi-view semantic veto cell that is removed from building evidence.")]
+    [Min(0f)] [SerializeField] private float consensusSemanticVetoDistanceMeters = 1f;
+    [Tooltip("Distinct contradictory-class views required to create a semantic veto cell.")]
+    [Min(1)] [SerializeField] private int consensusSemanticVetoMinimumViews = 2;
+    [Tooltip("Maximum gap for merging nearby consensus fragments after semantic carving.")]
+    [Min(0f)] [SerializeField] private float consensusFragmentMergeDistanceMeters = 1f;
+    [Tooltip("Building views that two fragments must share before they can be merged.")]
+    [Min(1)] [SerializeField] private int consensusFragmentMinimumSharedViews = 1;
+    [Tooltip("Prevent fragment merging when the direct grid path crosses a semantic veto cell.")]
+    [SerializeField] private bool consensusBlockMergeAcrossSemanticVeto = true;
 
     [Header("DBSCAN Cluster Modes")]
     [Tooltip("Maximum horizontal distance in metres between neighbouring DBSCAN hits.")]
@@ -628,6 +640,13 @@ public sealed class MaskRaycastProjector : MonoBehaviour
             ConsensusMinimumSupportingViews = consensusMinimumSupportingViews,
             ConsensusSingleViewExpansionDistanceMeters =
                 consensusSingleViewExpansionDistanceMeters,
+            ConsensusSemanticCarvingEnabled = consensusSemanticCarvingEnabled,
+            ConsensusSemanticVetoDistanceMeters = consensusSemanticVetoDistanceMeters,
+            ConsensusSemanticVetoMinimumViews = consensusSemanticVetoMinimumViews,
+            ConsensusFragmentMergeDistanceMeters = consensusFragmentMergeDistanceMeters,
+            ConsensusFragmentMinimumSharedViews = consensusFragmentMinimumSharedViews,
+            ConsensusBlockMergeAcrossSemanticVeto =
+                consensusBlockMergeAcrossSemanticVeto,
             ExcludeSemanticConflicts = excludeSemanticConflicts,
             SemanticConflictClassFilters = semanticConflictClassFilters,
             SemanticConflictDistanceMeters = semanticConflictDistanceMeters,
@@ -668,7 +687,13 @@ public sealed class MaskRaycastProjector : MonoBehaviour
                                       SurfaceHitClusterAssociationMode.MultiViewConsensus
             ? $" Consensus confirmed {summary.ConsensusConfirmedCellCount} cell(s) across " +
               $"{summary.ConsensusAvailableViewCount} available view(s) and attached " +
-              $"{summary.ConsensusExpandedCoreHitCount} nearby single-view core hit(s)."
+              $"{summary.ConsensusExpandedCoreHitCount} nearby single-view core hit(s). " +
+              $"Semantic carving used {summary.ConsensusSemanticVetoCellCount} veto " +
+              $"cell(s), removed {summary.ConsensusCarvedConfirmedCellCount} confirmed " +
+              $"cell(s), {summary.ConsensusCarvedCoreHitCount} core hit(s), and " +
+              $"{summary.ConsensusCarvedBoundaryHitCount} boundary hit(s). Merged " +
+              $"{summary.ConsensusFragmentMergeCount} fragment(s) from " +
+              $"{summary.ConsensusProvisionalClusterCount} provisional cluster(s)."
             : string.Empty;
         Debug.Log(
             $"[MaskRaycastProjector] Exported {summary.ExportedPolygonCount} provisional " +

@@ -124,7 +124,9 @@ The exporter then:
 2. either applies DBSCAN or builds a metric occupancy grid carrying the distinct view IDs that
    support each cell;
 3. in **Multi View Consensus** mode, keeps cells supported by the configured number of views,
-   connects neighbouring confirmed cells, and attaches nearby single-view core hits;
+   removes cells covered by multi-view contradictory semantics, connects immediate neighbouring
+   cells, and safely merges only nearby fragments that share building views and do not cross a
+   semantic veto cell;
 4. assigns original-mask boundary hits to the relevant same-detection cluster in dominant mode,
    or to the nearest retained cluster in aggregate and consensus modes; and
 5. splats accepted hits into a metric occupancy grid, traces its largest exterior ring, and
@@ -145,6 +147,12 @@ The default settings are deliberately provisional:
 - **Consensus Overlap Tolerance Meters:** `1.25`
 - **Consensus Minimum Supporting Views:** `2`
 - **Consensus Single View Expansion Distance Meters:** `1.5`
+- **Consensus Semantic Carving Enabled:** enabled
+- **Consensus Semantic Veto Distance Meters:** `1.0`
+- **Consensus Semantic Veto Minimum Views:** `2`
+- **Consensus Fragment Merge Distance Meters:** `1.0`
+- **Consensus Fragment Minimum Shared Views:** `1`
+- **Consensus Block Merge Across Semantic Veto:** enabled
 - **Dbscan Epsilon Meters:** `2`
 - **Dbscan Minimum Points:** `5`
 - **Boundary Assignment Distance Meters:** `4`
@@ -162,6 +170,16 @@ In consensus mode a single-view hit cannot seed a polygon. It can only expand a 
 that already contains the required multi-view support. **Consensus Overlap Tolerance Meters**
 absorbs small camera/collider alignment errors; lowering it separates nearby structures, while
 raising it confirms more sparse or slightly misaligned evidence.
+
+Semantic carving operates before polygon creation and is independent of whole-polygon semantic
+rejection. A contradictory cell is trusted only when it is supported by **Semantic Veto Minimum
+Views** distinct views. Building core and boundary hits near such cells are not used, so a raised
+tree canopy can cut a false bridge without deleting an otherwise valid building. After that cut,
+the initial connected components use strict 8-neighbour grid connectivity. **Fragment Merge
+Distance Meters** can reunite small nearby building pieces, but only when they share the configured
+number of building views; with **Block Merge Across Semantic Veto** enabled, the direct grid path
+must also avoid tree-veto cells. No polygon-area threshold is applied, so small real structures
+such as kiosks remain eligible.
 
 Clusters with fewer than three valid contour positions are reported as omitted. Raw core and
 boundary hits remain unchanged. A semantically wrong but geometrically dense building mask is
@@ -189,8 +207,8 @@ are rejected. This filter can only remove false buildings supported by one of th
 contradictory classes; unrelated false building masks still require better detections or another
 semantic class.
 
-For a controlled before/after test, project all masks once, disable **Exclude Semantic
-Conflicts**, and export a baseline. The polygons remain present but include their measured
-`semantic_conflict_ratio`. Then enable the option and export again; no second raycast is needed.
-Compare the two timestamped GeoJSON files and inspect
-`metadata.rejected_semantic_conflicts` in the filtered file.
+For the point-carving test, keep **Exclude Semantic Conflicts** disabled so the older ratio-based
+stage does not remove complete polygons. Project all building and tree masks once, then export with
+semantic carving enabled. No second raycast is needed when tuning carving or fragment-merge
+settings. The GeoJSON metadata records veto cells, carved confirmed cells, carved core/boundary
+hits, provisional clusters, and fragment merges for direct before/after comparison.
