@@ -7,6 +7,12 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
+public enum TopViewCameraProjectionMode
+{
+    SrtPerspective = 0,
+    Orthographic = 1
+}
+
 /// <summary>
 /// Experimental single-view pipeline:
 /// first-frame centre ray -> geodetic top camera -> Gaussian-splat PNG -> top-view masks ->
@@ -21,30 +27,31 @@ public sealed class TopViewSplatProjector : MonoBehaviour
 
     [Header("1. References")]
     [SerializeField] private SrtDroneRaycastPlayer player;
-    [Tooltip("Optional. When assigned, the capture is automatically fitted around the splat bounds while remaining centred on the first-frame centre hit.")]
+    [Tooltip("Optional. Used to fit Orthographic mode automatically around the splat bounds.")]
     [SerializeField] private GaussianSplatRenderer gaussianSplatRenderer;
 
     [Header("2. Top-view camera")]
     [Min(1)]
     [Tooltip("SRT FrameCnt used to cast the centre ray. FrameCnt starts at 1.")]
     [SerializeField] private int referenceFrameCount = 1;
-    [Min(0.1f)]
-    [Tooltip("Camera height above the centre-ray surface hit, in geodetic metres.")]
-    [SerializeField] private float cameraHeightMeters = 150f;
+    [Tooltip("Srt Perspective preserves the configured SRT camera lens. Orthographic uses parallel top-down rays and the coverage settings below.")]
+    [SerializeField] private TopViewCameraProjectionMode projectionMode =
+        TopViewCameraProjectionMode.SrtPerspective;
+    [Tooltip("Metres added to or subtracted from the reference drone-camera altitude. Zero preserves the SRT-derived altitude.")]
+    [SerializeField] private float heightOffsetMeters;
+    [Header("2a. Orthographic coverage")]
     [SerializeField] private bool autoFitGaussianBounds = true;
-    [Range(0f, 1f)]
-    [SerializeField] private float boundsPaddingFraction = 0.05f;
-    [Min(0.1f)]
-    [Tooltip("Used when Auto Fit Gaussian Bounds is disabled or no renderer is assigned.")]
-    [SerializeField] private float manualCoverageWidthMeters = 250f;
-    [Min(0.1f)]
-    [SerializeField] private float manualCoverageHeightMeters = 250f;
+    [Range(0f, 1f)] [SerializeField] private float boundsPaddingFraction = 0.05f;
+    [Min(0.1f)] [SerializeField] private float manualCoverageWidthMeters = 250f;
+    [Min(0.1f)] [SerializeField] private float manualCoverageHeightMeters = 250f;
     [Tooltip("Ordinary scene geometry is hidden by default; Gaussian splats are rendered by the URP feature independently of this mask.")]
     [SerializeField] private LayerMask captureSceneLayers = 0;
     [SerializeField] private Color captureBackground = Color.black;
 
     [Header("3. Top-view capture")]
     [Min(64)] [SerializeField] private int captureWidth = 2048;
+    [Tooltip("Derive capture height from the SRT-configured camera aspect ratio. Recommended for an exact camera match.")]
+    [SerializeField] private bool matchSrtCameraAspect = true;
     [Min(64)] [SerializeField] private int captureHeight = 2048;
     [SerializeField] private string capturePngPath = "Exports/top_view_splat.png";
     [SerializeField] private SrtDroneRaycastPlayer.FilePathRoot capturePathRoot =
@@ -123,9 +130,13 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                     return;
                 }
                 Debug.Log(
-                    $"[TopViewSplatProjector] Captured {captureWidth}x{captureHeight} top view to '{path}'. " +
-                    $"Centre is the FrameCnt {referenceFrameCount} central-ray hit; coverage is " +
-                    $"{Format(context.CoverageWidthMeters)} x {Format(context.CoverageHeightMeters)} m.",
+                    $"[TopViewSplatProjector] Captured {context.ImageWidth}x{context.ImageHeight} " +
+                    $"{context.ProjectionName} top view to '{path}'. Centre is the FrameCnt " +
+                    $"{referenceFrameCount} central-ray hit; estimated centre-plane coverage is " +
+                    $"{Format(context.CoverageWidthMeters)} x {Format(context.CoverageHeightMeters)} m. " +
+                    $"Height is {Format(context.ReferenceHeightMeters)} m from SRT/transform JSON " +
+                    $"{FormatSigned(context.HeightOffsetMeters)} m offset = " +
+                    $"{Format(context.FinalHeightMeters)} m above the centre hit.",
                     this);
             }
             else
@@ -171,8 +182,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         error = string.Empty;
         if (referenceFrameCount < 1)
             return Fail("Reference Frame Count must be at least 1.", out error);
-        if (cameraHeightMeters <= 0f || !IsFinite(cameraHeightMeters))
-            return Fail("Camera Height Metres must be finite and greater than zero.", out error);
+        if (!IsFinite(heightOffsetMeters))
+            return Fail("Height Offset Metres must be finite.", out error);
         if (captureWidth < 64 || captureHeight < 64)
             return Fail("Capture dimensions must both be at least 64 pixels.", out error);
         if (!player.TryConfigureForFrameCnt(referenceFrameCount, out string configureError))
@@ -192,37 +203,32 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             !player.TryConvertEnuOffsetToWorldVector(Vector3.forward, out Vector3 upMetre))
             return Fail("The SRT player could not derive world-space ENU axes.", out error);
 
-        Quaternion rotation = Quaternion.LookRotation(-worldUp, worldNorth);
-        Vector3 cameraPosition = centreHit.point + upMetre * cameraHeightMeters;
-        float aspect = (float)captureWidth / captureHeight;
-        float halfWidthWorld;
-        float halfHeightWorld;
-        if (autoFitGaussianBounds && gaussianSplatRenderer != null &&
-            gaussianSplatRenderer.asset != null)
+        float upWorldUnitsPerMetre = upMetre.magnitude;
+        if (!IsFinite(upWorldUnitsPerMetre) || upWorldUnitsPerMetre <= 0.000001f)
+            return Fail("The transform JSON produces an invalid vertical metres-to-world scale.", out error);
+        float referenceHeightWorld = Vector3.Dot(
+            sourceCamera.transform.position - centreHit.point, worldUp);
+        float referenceHeightMeters = referenceHeightWorld / upWorldUnitsPerMetre;
+        float finalHeightMeters = referenceHeightMeters + heightOffsetMeters;
+        if (!IsFinite(referenceHeightMeters) || !IsFinite(finalHeightMeters) ||
+            finalHeightMeters <= 0.1f)
         {
-            CalculateSplatHalfExtents(
-                gaussianSplatRenderer,
-                centreHit.point,
-                rotation * Vector3.right,
-                rotation * Vector3.up,
-                out halfWidthWorld,
-                out halfHeightWorld);
-            float paddingMultiplier = 1f + Mathf.Clamp01(boundsPaddingFraction);
-            halfWidthWorld *= paddingMultiplier;
-            halfHeightWorld *= paddingMultiplier;
+            return Fail(
+                $"Reference height {Format(referenceHeightMeters)} m plus offset " +
+                $"{Format(heightOffsetMeters)} m does not place the top camera above the centre hit.",
+                out error);
         }
-        else
-        {
-            if (manualCoverageWidthMeters <= 0f || manualCoverageHeightMeters <= 0f ||
-                !IsFinite(manualCoverageWidthMeters) || !IsFinite(manualCoverageHeightMeters))
-                return Fail("Manual coverage dimensions must be finite and greater than zero.", out error);
-            halfWidthWorld = eastMetre.magnitude * manualCoverageWidthMeters * 0.5f;
-            halfHeightWorld = northMetre.magnitude * manualCoverageHeightMeters * 0.5f;
-        }
-        if (halfWidthWorld <= 0.000001f || halfHeightWorld <= 0.000001f)
-            return Fail("The calculated top-view coverage is empty.", out error);
 
-        float orthographicSize = Mathf.Max(halfHeightWorld, halfWidthWorld / aspect);
+        int imageWidth = Mathf.Max(64, captureWidth);
+        float srtAspect = sourceCamera.aspect;
+        if (!IsFinite(srtAspect) || srtAspect <= 0f)
+            return Fail("The SRT-configured Drone View Camera has an invalid aspect ratio.", out error);
+        int imageHeight = matchSrtCameraAspect
+            ? Mathf.Max(64, Mathf.RoundToInt(imageWidth / srtAspect))
+            : Mathf.Max(64, captureHeight);
+        float outputAspect = (float)imageWidth / imageHeight;
+        Quaternion rotation = Quaternion.LookRotation(-worldUp, worldNorth);
+        Vector3 cameraPosition = centreHit.point + upMetre * finalHeightMeters;
         GameObject cameraObject = new GameObject("TopViewSplatCamera")
         {
             hideFlags = HideFlags.HideAndDontSave
@@ -231,26 +237,94 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         topCamera.CopyFrom(sourceCamera);
         topCamera.enabled = false;
         topCamera.transform.SetPositionAndRotation(cameraPosition, rotation);
-        topCamera.usePhysicalProperties = false;
-        topCamera.orthographic = true;
-        topCamera.orthographicSize = orthographicSize;
-        topCamera.aspect = aspect;
+        topCamera.aspect = outputAspect;
         topCamera.clearFlags = CameraClearFlags.SolidColor;
         topCamera.backgroundColor = captureBackground;
         topCamera.cullingMask = captureSceneLayers;
         topCamera.nearClipPlane = 0.01f;
+        float centreDistanceWorld = Vector3.Distance(cameraPosition, centreHit.point);
+        float effectiveWidthWorld;
+        float effectiveHeightWorld;
+        float orthographicSizeWorld = 0f;
+        if (projectionMode == TopViewCameraProjectionMode.Orthographic)
+        {
+            if (autoFitGaussianBounds && gaussianSplatRenderer != null &&
+                gaussianSplatRenderer.asset != null)
+            {
+                CalculateSplatHalfExtents(
+                    gaussianSplatRenderer,
+                    centreHit.point,
+                    rotation * Vector3.right,
+                    rotation * Vector3.up,
+                    out float halfWidthWorld,
+                    out float halfHeightWorld);
+                float paddingMultiplier = 1f + Mathf.Clamp01(boundsPaddingFraction);
+                effectiveWidthWorld = halfWidthWorld * paddingMultiplier * 2f;
+                effectiveHeightWorld = halfHeightWorld * paddingMultiplier * 2f;
+            }
+            else
+            {
+                if (manualCoverageWidthMeters <= 0f || manualCoverageHeightMeters <= 0f ||
+                    !IsFinite(manualCoverageWidthMeters) || !IsFinite(manualCoverageHeightMeters))
+                {
+                    DestroyTemporaryCamera(topCamera);
+                    topCamera = null;
+                    return Fail(
+                        "Manual orthographic coverage dimensions must be finite and greater than zero.",
+                        out error);
+                }
+                effectiveWidthWorld = eastMetre.magnitude * manualCoverageWidthMeters;
+                effectiveHeightWorld = northMetre.magnitude * manualCoverageHeightMeters;
+            }
+
+            if (effectiveWidthWorld <= 0.000001f || effectiveHeightWorld <= 0.000001f)
+            {
+                DestroyTemporaryCamera(topCamera);
+                topCamera = null;
+                return Fail("The calculated orthographic top-view coverage is empty.", out error);
+            }
+
+            topCamera.usePhysicalProperties = false;
+            topCamera.orthographic = true;
+            orthographicSizeWorld = Mathf.Max(
+                effectiveHeightWorld * 0.5f,
+                effectiveWidthWorld * 0.5f / outputAspect);
+            topCamera.orthographicSize = orthographicSizeWorld;
+            effectiveWidthWorld = orthographicSizeWorld * outputAspect * 2f;
+            effectiveHeightWorld = orthographicSizeWorld * 2f;
+        }
+        else
+        {
+            topCamera.orthographic = false;
+            float halfHeightWorld = centreDistanceWorld *
+                                    Mathf.Tan(topCamera.fieldOfView * Mathf.Deg2Rad * 0.5f);
+            effectiveHeightWorld = halfHeightWorld * 2f;
+            effectiveWidthWorld = effectiveHeightWorld * outputAspect;
+        }
+
         topCamera.farClipPlane = Mathf.Max(
             sourceCamera.farClipPlane,
-            Vector3.Distance(cameraPosition, centreHit.point) * 4f + orthographicSize * 2f);
-
-        float effectiveWidthWorld = orthographicSize * aspect * 2f;
-        float effectiveHeightWorld = orthographicSize * 2f;
+            centreDistanceWorld * 4f + orthographicSizeWorld * 2f);
+        string projectionName = projectionMode == TopViewCameraProjectionMode.Orthographic
+            ? "orthographic"
+            : "srt_perspective";
         context = new TopViewContext(
             centreHit.point,
             cameraPosition,
             rotation,
+            projectionName,
+            imageWidth,
+            imageHeight,
             effectiveWidthWorld / Mathf.Max(eastMetre.magnitude, 0.000001f),
             effectiveHeightWorld / Mathf.Max(northMetre.magnitude, 0.000001f),
+            referenceHeightMeters,
+            finalHeightMeters,
+            heightOffsetMeters,
+            topCamera.fieldOfView,
+            topCamera.focalLength,
+            topCamera.sensorSize,
+            topCamera.usePhysicalProperties,
+            orthographicSizeWorld,
             worldEast,
             worldNorth,
             worldUp);
@@ -302,6 +376,15 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         }
         if (string.IsNullOrWhiteSpace(outputPath))
             return Fail("Capture PNG path is empty.", out error);
+        if (Directory.Exists(outputPath))
+        {
+            return Fail(
+                $"Capture PNG Path points to a directory. Include a filename, for example " +
+                $"'{Path.Combine(outputPath, "top_view_splat.png")}'.",
+                out error);
+        }
+        if (!string.Equals(Path.GetExtension(outputPath), ".png", StringComparison.OrdinalIgnoreCase))
+            return Fail("Capture PNG Path must end in .png.", out error);
 
         RenderTexture renderTexture = null;
         Texture2D image = null;
@@ -309,7 +392,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         RenderTexture previousTarget = camera.targetTexture;
         try
         {
-            renderTexture = new RenderTexture(captureWidth, captureHeight, 24, RenderTextureFormat.ARGB32)
+            renderTexture = new RenderTexture(
+                context.ImageWidth, context.ImageHeight, 24, RenderTextureFormat.ARGB32)
             {
                 name = "TopViewSplatCapture",
                 hideFlags = HideFlags.HideAndDontSave,
@@ -319,11 +403,13 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             camera.targetTexture = renderTexture;
             camera.Render();
             RenderTexture.active = renderTexture;
-            image = new Texture2D(captureWidth, captureHeight, TextureFormat.RGB24, false, false)
+            image = new Texture2D(
+                context.ImageWidth, context.ImageHeight, TextureFormat.RGB24, false, false)
             {
                 hideFlags = HideFlags.HideAndDontSave
             };
-            image.ReadPixels(new Rect(0, 0, captureWidth, captureHeight), 0, 0, false);
+            image.ReadPixels(
+                new Rect(0, 0, context.ImageWidth, context.ImageHeight), 0, 0, false);
             image.Apply(false, false);
             byte[] png = image.EncodeToPNG();
             if (png == null || png.Length == 0)
@@ -362,12 +448,19 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["type"] = "triffid_top_view_capture",
             ["image_path"] = imagePath,
             ["reference_frame_cnt"] = referenceFrameCount,
-            ["width_px"] = captureWidth,
-            ["height_px"] = captureHeight,
-            ["projection"] = "orthographic",
-            ["coverage_width_m"] = context.CoverageWidthMeters,
-            ["coverage_height_m"] = context.CoverageHeightMeters,
-            ["camera_height_m"] = cameraHeightMeters,
+            ["width_px"] = context.ImageWidth,
+            ["height_px"] = context.ImageHeight,
+            ["projection"] = context.ProjectionName,
+            ["estimated_centre_plane_coverage_width_m"] = context.CoverageWidthMeters,
+            ["estimated_centre_plane_coverage_height_m"] = context.CoverageHeightMeters,
+            ["reference_drone_height_above_centre_m"] = context.ReferenceHeightMeters,
+            ["height_offset_m"] = context.HeightOffsetMeters,
+            ["final_camera_height_above_centre_m"] = context.FinalHeightMeters,
+            ["vertical_fov_degrees"] = context.VerticalFieldOfViewDegrees,
+            ["focal_length_mm"] = context.FocalLengthMillimetres,
+            ["sensor_size_mm"] = new JArray(context.SensorSizeMillimetres.x, context.SensorSizeMillimetres.y),
+            ["uses_physical_camera"] = context.UsesPhysicalCamera,
+            ["orthographic_size_world_units"] = context.OrthographicSizeWorld,
             ["centre_wgs84"] = new JArray(centreLongitude, centreLatitude, centreAltitude),
             ["centre_world"] = VectorToJson(context.CentreWorld),
             ["camera_world"] = VectorToJson(context.CameraWorld),
@@ -419,12 +512,12 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                     $"[TopViewSplatProjector] Omitted mask '{files[fileIndex]}': {maskError}", this);
                 continue;
             }
-            if (mask.Width != captureWidth || mask.Height != captureHeight)
+            if (mask.Width != context.ImageWidth || mask.Height != context.ImageHeight)
             {
                 Debug.LogWarning(
                     $"[TopViewSplatProjector] Omitted mask '{files[fileIndex]}': dimensions " +
                     $"{mask.Width}x{mask.Height} do not match the top-view capture " +
-                    $"{captureWidth}x{captureHeight}.", this);
+                    $"{context.ImageWidth}x{context.ImageHeight}.", this);
                 continue;
             }
 
@@ -438,6 +531,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                 acceptedComponents++;
                 if (!TryBuildPolygonFeature(
                         camera,
+                        context,
                         mask,
                         component,
                         files[fileIndex],
@@ -473,13 +567,20 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["metadata"] = new JObject
             {
                 ["coordinate_space"] = Wgs84CoordinateSpace,
-                ["source"] = "orthographic_top_view_mask_raycast",
+                ["source"] = context.ProjectionName + "_top_view_mask_raycast",
+                ["projection"] = context.ProjectionName,
                 ["class"] = polygonClassName,
                 ["reference_frame_cnt"] = referenceFrameCount,
-                ["capture_width_px"] = captureWidth,
-                ["capture_height_px"] = captureHeight,
-                ["coverage_width_m"] = context.CoverageWidthMeters,
-                ["coverage_height_m"] = context.CoverageHeightMeters,
+                ["capture_width_px"] = context.ImageWidth,
+                ["capture_height_px"] = context.ImageHeight,
+                ["estimated_centre_plane_coverage_width_m"] = context.CoverageWidthMeters,
+                ["estimated_centre_plane_coverage_height_m"] = context.CoverageHeightMeters,
+                ["reference_drone_height_above_centre_m"] = context.ReferenceHeightMeters,
+                ["height_offset_m"] = context.HeightOffsetMeters,
+                ["final_camera_height_above_centre_m"] = context.FinalHeightMeters,
+                ["vertical_fov_degrees"] = context.VerticalFieldOfViewDegrees,
+                ["focal_length_mm"] = context.FocalLengthMillimetres,
+                ["orthographic_size_world_units"] = context.OrthographicSizeWorld,
                 ["centre_wgs84"] = new JArray(centreLongitude, centreLatitude, centreAltitude),
                 ["mask_file_count"] = files.Count,
                 ["connected_component_count"] = discoveredComponents,
@@ -507,6 +608,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
 
     private bool TryBuildPolygonFeature(
         Camera camera,
+        TopViewContext context,
         ForegroundMask mask,
         PixelComponent component,
         string maskFile,
@@ -574,7 +676,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["properties"] = new JObject
             {
                 ["class"] = polygonClassName,
-                ["source"] = "orthographic_top_view_mask_raycast",
+                ["source"] = context.ProjectionName + "_top_view_mask_raycast",
+                ["projection"] = context.ProjectionName,
                 ["mask_file"] = Path.GetFileName(maskFile),
                 ["component_index"] = componentIndex,
                 ["source_pixel_count"] = component.Pixels.Count,
@@ -1133,6 +1236,11 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         return value.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
+    private static string FormatSigned(double value)
+    {
+        return value.ToString("+0.###;-0.###;0", CultureInfo.InvariantCulture);
+    }
+
     private static bool Fail(string message, out string error)
     {
         error = message;
@@ -1144,8 +1252,19 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         public readonly Vector3 CentreWorld;
         public readonly Vector3 CameraWorld;
         public readonly Quaternion CameraRotation;
+        public readonly string ProjectionName;
+        public readonly int ImageWidth;
+        public readonly int ImageHeight;
         public readonly float CoverageWidthMeters;
         public readonly float CoverageHeightMeters;
+        public readonly float ReferenceHeightMeters;
+        public readonly float FinalHeightMeters;
+        public readonly float HeightOffsetMeters;
+        public readonly float VerticalFieldOfViewDegrees;
+        public readonly float FocalLengthMillimetres;
+        public readonly Vector2 SensorSizeMillimetres;
+        public readonly bool UsesPhysicalCamera;
+        public readonly float OrthographicSizeWorld;
         public readonly Vector3 WorldEast;
         public readonly Vector3 WorldNorth;
         public readonly Vector3 WorldUp;
@@ -1154,8 +1273,19 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             Vector3 centreWorld,
             Vector3 cameraWorld,
             Quaternion cameraRotation,
+            string projectionName,
+            int imageWidth,
+            int imageHeight,
             float coverageWidthMeters,
             float coverageHeightMeters,
+            float referenceHeightMeters,
+            float finalHeightMeters,
+            float heightOffsetMeters,
+            float verticalFieldOfViewDegrees,
+            float focalLengthMillimetres,
+            Vector2 sensorSizeMillimetres,
+            bool usesPhysicalCamera,
+            float orthographicSizeWorld,
             Vector3 worldEast,
             Vector3 worldNorth,
             Vector3 worldUp)
@@ -1163,8 +1293,19 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             CentreWorld = centreWorld;
             CameraWorld = cameraWorld;
             CameraRotation = cameraRotation;
+            ProjectionName = projectionName;
+            ImageWidth = imageWidth;
+            ImageHeight = imageHeight;
             CoverageWidthMeters = coverageWidthMeters;
             CoverageHeightMeters = coverageHeightMeters;
+            ReferenceHeightMeters = referenceHeightMeters;
+            FinalHeightMeters = finalHeightMeters;
+            HeightOffsetMeters = heightOffsetMeters;
+            VerticalFieldOfViewDegrees = verticalFieldOfViewDegrees;
+            FocalLengthMillimetres = focalLengthMillimetres;
+            SensorSizeMillimetres = sensorSizeMillimetres;
+            UsesPhysicalCamera = usesPhysicalCamera;
+            OrthographicSizeWorld = orthographicSizeWorld;
             WorldEast = worldEast;
             WorldNorth = worldNorth;
             WorldUp = worldUp;
