@@ -13,6 +13,12 @@ public enum TopViewCameraProjectionMode
     Orthographic = 1
 }
 
+public enum TopViewCameraHeightMode
+{
+    SrtReferencePlusOffset = 0,
+    FixedUnityUnitsAboveCentre = 1
+}
+
 /// <summary>
 /// Experimental single-view pipeline:
 /// first-frame centre ray -> geodetic top camera -> Gaussian-splat PNG -> top-view masks ->
@@ -37,8 +43,14 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     [Tooltip("Srt Perspective preserves the configured SRT camera lens. Orthographic uses parallel top-down rays and the coverage settings below.")]
     [SerializeField] private TopViewCameraProjectionMode projectionMode =
         TopViewCameraProjectionMode.SrtPerspective;
+    [Tooltip("Choose whether camera height follows the reference SRT altitude or uses a fixed Unity-world distance above the centre hit.")]
+    [SerializeField] private TopViewCameraHeightMode heightMode =
+        TopViewCameraHeightMode.SrtReferencePlusOffset;
     [Tooltip("Metres added to or subtracted from the reference drone-camera altitude. Zero preserves the SRT-derived altitude.")]
     [SerializeField] private float heightOffsetMeters;
+    [Min(0.0001f)]
+    [Tooltip("Used only by Fixed Unity Units Above Centre. This is a direct Unity-world distance and does not depend on the SRT drone altitude.")]
+    [SerializeField] private float fixedHeightUnityUnits = 1.5f;
     [Range(-180f, 180f)]
     [Tooltip("Rotation around geodetic Up after aligning the image with the splat's local Forward axis (or Unity world Forward when no splat renderer is assigned).")]
     [SerializeField] private float imageRotationDegrees;
@@ -215,9 +227,9 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                     $"{context.ProjectionName} top view to '{path}'. Centre is the FrameCnt " +
                     $"{referenceFrameCount} central-ray hit; estimated centre-plane coverage is " +
                     $"{Format(context.CoverageWidthMeters)} x {Format(context.CoverageHeightMeters)} m. " +
-                    $"Height is {Format(context.ReferenceHeightMeters)} m from SRT/transform JSON " +
-                    $"{FormatSigned(context.HeightOffsetMeters)} m offset = " +
-                    $"{Format(context.FinalHeightMeters)} m above the centre hit.",
+                    $"Height mode is {context.HeightModeName}; final height is " +
+                    $"{Format(context.FinalHeightWorldUnits)} Unity units " +
+                    $"({Format(context.FinalHeightMeters)} geodetic m) above the centre hit.",
                     this);
             }
             else
@@ -263,8 +275,12 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         error = string.Empty;
         if (referenceFrameCount < 1)
             return Fail("Reference Frame Count must be at least 1.", out error);
-        if (!IsFinite(heightOffsetMeters))
+        if (heightMode == TopViewCameraHeightMode.SrtReferencePlusOffset &&
+            !IsFinite(heightOffsetMeters))
             return Fail("Height Offset Metres must be finite.", out error);
+        if (heightMode == TopViewCameraHeightMode.FixedUnityUnitsAboveCentre &&
+            (!IsFinite(fixedHeightUnityUnits) || fixedHeightUnityUnits <= 0.0001f))
+            return Fail("Fixed Height Unity Units must be finite and greater than zero.", out error);
         if (!IsFinite(imageRotationDegrees))
             return Fail("Image Rotation Degrees must be finite.", out error);
         if (captureWidth < 64 || captureHeight < 64)
@@ -292,15 +308,29 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         float referenceHeightWorld = Vector3.Dot(
             sourceCamera.transform.position - centreHit.point, worldUp);
         float referenceHeightMeters = referenceHeightWorld / upWorldUnitsPerMetre;
-        float finalHeightMeters = referenceHeightMeters + heightOffsetMeters;
-        if (!IsFinite(referenceHeightMeters) || !IsFinite(finalHeightMeters) ||
-            finalHeightMeters <= 0.1f)
+        if (!IsFinite(referenceHeightMeters))
+            return Fail("The SRT reference height above the centre hit is invalid.", out error);
+
+        float appliedHeightOffsetMeters = 0f;
+        float finalHeightMeters;
+        float finalHeightWorldUnits;
+        string heightModeName;
+        if (heightMode == TopViewCameraHeightMode.FixedUnityUnitsAboveCentre)
         {
-            return Fail(
-                $"Reference height {Format(referenceHeightMeters)} m plus offset " +
-                $"{Format(heightOffsetMeters)} m does not place the top camera above the centre hit.",
-                out error);
+            finalHeightWorldUnits = fixedHeightUnityUnits;
+            finalHeightMeters = finalHeightWorldUnits / upWorldUnitsPerMetre;
+            heightModeName = "fixed_unity_units_above_centre";
         }
+        else
+        {
+            appliedHeightOffsetMeters = heightOffsetMeters;
+            finalHeightMeters = referenceHeightMeters + appliedHeightOffsetMeters;
+            finalHeightWorldUnits = finalHeightMeters * upWorldUnitsPerMetre;
+            heightModeName = "srt_reference_plus_offset";
+        }
+        if (!IsFinite(finalHeightMeters) || !IsFinite(finalHeightWorldUnits) ||
+            finalHeightMeters <= 0.1f || finalHeightWorldUnits <= 0.0001f)
+            return Fail("The selected height mode does not place the top camera above the centre hit.", out error);
 
         int imageWidth = Mathf.Max(64, captureWidth);
         float srtAspect = sourceCamera.aspect;
@@ -328,7 +358,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         baseImageUp.Normalize();
         Vector3 imageUp = Quaternion.AngleAxis(imageRotationDegrees, worldUp) * baseImageUp;
         Quaternion rotation = Quaternion.LookRotation(-worldUp, imageUp);
-        Vector3 cameraPosition = centreHit.point + upMetre * finalHeightMeters;
+        Vector3 cameraPosition = centreHit.point + worldUp * finalHeightWorldUnits;
         GameObject cameraObject = new GameObject("TopViewSplatCamera")
         {
             hideFlags = HideFlags.HideAndDontSave
@@ -413,6 +443,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             cameraPosition,
             rotation,
             projectionName,
+            heightModeName,
             imageAlignment,
             imageUp,
             imageWidth,
@@ -421,7 +452,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             effectiveHeightWorld / Mathf.Max(northMetre.magnitude, 0.000001f),
             referenceHeightMeters,
             finalHeightMeters,
-            heightOffsetMeters,
+            appliedHeightOffsetMeters,
+            finalHeightWorldUnits,
             imageRotationDegrees,
             topCamera.fieldOfView,
             topCamera.focalLength,
@@ -554,12 +586,14 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["width_px"] = context.ImageWidth,
             ["height_px"] = context.ImageHeight,
             ["projection"] = context.ProjectionName,
+            ["height_mode"] = context.HeightModeName,
             ["image_alignment"] = context.ImageAlignment,
             ["estimated_centre_plane_coverage_width_m"] = context.CoverageWidthMeters,
             ["estimated_centre_plane_coverage_height_m"] = context.CoverageHeightMeters,
             ["reference_drone_height_above_centre_m"] = context.ReferenceHeightMeters,
             ["height_offset_m"] = context.HeightOffsetMeters,
             ["final_camera_height_above_centre_m"] = context.FinalHeightMeters,
+            ["final_camera_height_above_centre_unity_units"] = context.FinalHeightWorldUnits,
             ["image_rotation_degrees_from_alignment"] = context.ImageRotationDegrees,
             ["vertical_fov_degrees"] = context.VerticalFieldOfViewDegrees,
             ["focal_length_mm"] = context.FocalLengthMillimetres,
@@ -675,6 +709,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                 ["coordinate_space"] = Wgs84CoordinateSpace,
                 ["source"] = context.ProjectionName + "_top_view_mask_raycast",
                 ["projection"] = context.ProjectionName,
+                ["height_mode"] = context.HeightModeName,
                 ["image_alignment"] = context.ImageAlignment,
                 ["class"] = polygonClassName,
                 ["reference_frame_cnt"] = referenceFrameCount,
@@ -685,6 +720,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                 ["reference_drone_height_above_centre_m"] = context.ReferenceHeightMeters,
                 ["height_offset_m"] = context.HeightOffsetMeters,
                 ["final_camera_height_above_centre_m"] = context.FinalHeightMeters,
+                ["final_camera_height_above_centre_unity_units"] = context.FinalHeightWorldUnits,
                 ["image_rotation_degrees_from_alignment"] = context.ImageRotationDegrees,
                 ["vertical_fov_degrees"] = context.VerticalFieldOfViewDegrees,
                 ["focal_length_mm"] = context.FocalLengthMillimetres,
@@ -1378,6 +1414,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         public readonly Vector3 CameraWorld;
         public readonly Quaternion CameraRotation;
         public readonly string ProjectionName;
+        public readonly string HeightModeName;
         public readonly string ImageAlignment;
         public readonly Vector3 ImageUpWorld;
         public readonly int ImageWidth;
@@ -1387,6 +1424,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         public readonly float ReferenceHeightMeters;
         public readonly float FinalHeightMeters;
         public readonly float HeightOffsetMeters;
+        public readonly float FinalHeightWorldUnits;
         public readonly float ImageRotationDegrees;
         public readonly float VerticalFieldOfViewDegrees;
         public readonly float FocalLengthMillimetres;
@@ -1402,6 +1440,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             Vector3 cameraWorld,
             Quaternion cameraRotation,
             string projectionName,
+            string heightModeName,
             string imageAlignment,
             Vector3 imageUpWorld,
             int imageWidth,
@@ -1411,6 +1450,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             float referenceHeightMeters,
             float finalHeightMeters,
             float heightOffsetMeters,
+            float finalHeightWorldUnits,
             float imageRotationDegrees,
             float verticalFieldOfViewDegrees,
             float focalLengthMillimetres,
@@ -1425,6 +1465,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             CameraWorld = cameraWorld;
             CameraRotation = cameraRotation;
             ProjectionName = projectionName;
+            HeightModeName = heightModeName;
             ImageAlignment = imageAlignment;
             ImageUpWorld = imageUpWorld;
             ImageWidth = imageWidth;
@@ -1434,6 +1475,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ReferenceHeightMeters = referenceHeightMeters;
             FinalHeightMeters = finalHeightMeters;
             HeightOffsetMeters = heightOffsetMeters;
+            FinalHeightWorldUnits = finalHeightWorldUnits;
             ImageRotationDegrees = imageRotationDegrees;
             VerticalFieldOfViewDegrees = verticalFieldOfViewDegrees;
             FocalLengthMillimetres = focalLengthMillimetres;

@@ -30,9 +30,13 @@ The experiment uses this sequence:
      camera configured from that SRT frame.
    - `Orthographic` uses parallel rays. Enable **Auto Fit Gaussian Bounds** to fit the splat,
      or disable it and provide the manual coverage width and height in metres.
-6. Set **Height Offset Meters** to `0` to keep the reference SRT height. Positive values move
-   the top camera upward and negative values move it downward along geodetic Up. The final
-   camera must remain above the centre hit.
+6. Select **Height Mode**:
+   - `SrtReferencePlusOffset` places the camera at the reference SRT altitude and applies
+     **Height Offset Meters** along geodetic Up.
+   - `FixedUnityUnitsAboveCentre` ignores the reference drone altitude and places the camera
+     **Fixed Height Unity Units** above the centre-ray surface hit. This is a direct Unity-world
+     distance; the default `1.5` is close to the current test capture's approximately `1.38`
+     world-unit height.
 7. Leave **Image Rotation Degrees** at `0` to align the image with the splat's local Forward
    axis. A non-zero value adds a manual rotation around geodetic Up.
 8. Keep **Capture Scene Layers** empty (`Nothing`) when only the splat should appear. The
@@ -98,7 +102,8 @@ coordinates.
 |---|---:|
 | Reference Frame Count | `1` |
 | Projection Mode | `SrtPerspective` |
-| Height Offset Meters | `0` |
+| Height Mode | `FixedUnityUnitsAboveCentre` |
+| Fixed Height Unity Units | `1.5` |
 | Image Rotation Degrees | `0` |
 | Match SRT Camera Aspect | enabled |
 | Capture Width | `2048` |
@@ -109,10 +114,10 @@ coordinates.
 | Contour Inset Pixels | `0.35` |
 | Minimum Successful Ray Fraction | `0.5` |
 
-In `SrtPerspective`, changing **Height Offset Meters** changes both camera altitude and visible
+In `SrtPerspective`, changing the selected height changes both camera altitude and visible
 coverage while preserving the SRT lens. In `Orthographic`, height changes the ray origin but
 coverage comes from auto-fit or the manual coverage values. If auto-fit includes distant splat
 outliers and makes the site too small in the image, disable it and set **Manual Coverage
-Width/Height Metres**. Do not change the projection, height, resolution or coverage after
-producing the masks; capture a new image and regenerate the masks whenever these settings
-change.
+Width/Height Metres**. Do not change the projection, height mode/value, resolution, rotation or
+coverage after producing the masks; capture a new image and regenerate the masks whenever
+these settings change.
