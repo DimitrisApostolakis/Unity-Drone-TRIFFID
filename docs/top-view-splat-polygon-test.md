@@ -22,8 +22,8 @@ The experiment uses this sequence:
 1. Add `TopViewSplatProjector` to the same GameObject as `SrtDroneRaycastPlayer`, or to any
    other active GameObject.
 2. Assign the existing `SrtDroneRaycastPlayer` to **Player**.
-3. Assign the scene's `GaussianSplatRenderer` to **Gaussian Splat Renderer** when using
-   automatic coverage in `Orthographic` mode.
+3. Assign the scene's `GaussianSplatRenderer` to **Gaussian Splat Renderer**. Its local Forward
+   axis aligns the image, and its bounds can also provide automatic `Orthographic` coverage.
 4. Leave **Reference Frame Count** at `1` to use the first SRT frame.
 5. Select **Projection Mode**:
    - `SrtPerspective` copies the lens, physical sensor, focal length/FOV and aspect from the
@@ -33,16 +33,36 @@ The experiment uses this sequence:
 6. Set **Height Offset Meters** to `0` to keep the reference SRT height. Positive values move
    the top camera upward and negative values move it downward along geodetic Up. The final
    camera must remain above the centre hit.
-7. Keep **Capture Scene Layers** empty (`Nothing`) when only the splat should appear. The
+7. Leave **Image Rotation Degrees** at `0` to align the image with the splat's local Forward
+   axis. A non-zero value adds a manual rotation around geodetic Up.
+8. Keep **Capture Scene Layers** empty (`Nothing`) when only the splat should appear. The
    Gaussian URP render feature is independent of the ordinary camera culling mask, while the
    visible collider mesh is thereby excluded from the capture.
-8. Set an output including the `.png` filename, such as
+9. Set an output including the `.png` filename, such as
    `D:\TRIFFID\outputs\orbit_01\top_view_splat.png`, in **Capture Png Path**. Absolute paths
    ignore the selected path root; a directory by itself is not a valid capture path.
-9. Open the component's context menu and run **1. Capture Top View Splat PNG**.
+10. Open the component's context menu and run **1. Capture Top View Splat PNG**.
+
+## Game View preview
+
+Before capturing, open the component context menu and run **0. Show Or Refresh Game View
+Preview**. Unity creates a non-saved `TopViewGamePreviewCamera`, enables it at a high camera
+depth and focuses the Game View. The preview uses the same projection, position, lens,
+orientation, culling mask and background as the PNG capture.
+
+Choose a Game View aspect matching the reported capture dimensions—for example `16:9` for
+`2048x1152`—to avoid display stretching. After changing projection, height, rotation or
+coverage, run the preview command again. Use **0b. Stop Game View Preview** when finished; the
+preview camera is also removed automatically when the component is disabled.
+
+At **Image Rotation Degrees = 0**, the top of the image follows the assigned splat's projected
+local Forward axis. If no renderer is assigned, Unity world Forward is used. The camera still
+looks straight down along geodetic Up; only the image-plane orientation changes.
 
 The component also writes `top_view_splat.png.json`. It records the centre, camera pose,
-coverage, orientation and resolution used for the image.
+coverage, orientation and resolution used for the image. Polygon projection currently rebuilds
+that camera from the current Inspector settings rather than reading the manifest, so do not
+change those settings between capture and mask projection.
 
 ## Mask requirements
 
@@ -79,6 +99,7 @@ coordinates.
 | Reference Frame Count | `1` |
 | Projection Mode | `SrtPerspective` |
 | Height Offset Meters | `0` |
+| Image Rotation Degrees | `0` |
 | Match SRT Camera Aspect | enabled |
 | Capture Width | `2048` |
 | Bounds Padding Fraction | `0.05` |

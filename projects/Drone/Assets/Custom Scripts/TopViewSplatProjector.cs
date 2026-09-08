@@ -39,6 +39,9 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         TopViewCameraProjectionMode.SrtPerspective;
     [Tooltip("Metres added to or subtracted from the reference drone-camera altitude. Zero preserves the SRT-derived altitude.")]
     [SerializeField] private float heightOffsetMeters;
+    [Range(-180f, 180f)]
+    [Tooltip("Rotation around geodetic Up after aligning the image with the splat's local Forward axis (or Unity world Forward when no splat renderer is assigned).")]
+    [SerializeField] private float imageRotationDegrees;
     [Header("2a. Orthographic coverage")]
     [SerializeField] private bool autoFitGaussianBounds = true;
     [Range(0f, 1f)] [SerializeField] private float boundsPaddingFraction = 0.05f;
@@ -83,6 +86,84 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     [SerializeField] private string polygonGeoJsonPath = "Exports/top_view_polygons.geojson";
     [SerializeField] private SrtDroneRaycastPlayer.FilePathRoot polygonOutputPathRoot =
         SrtDroneRaycastPlayer.FilePathRoot.ProjectRoot;
+
+    [NonSerialized] private Camera gameViewPreviewCamera;
+
+    [ContextMenu("0. Show Or Refresh Game View Preview")]
+    public void ShowOrRefreshGameViewPreview()
+    {
+        if (player == null)
+        {
+            Debug.LogError("[TopViewSplatProjector] SrtDroneRaycastPlayer reference is missing.", this);
+            return;
+        }
+
+        SrtDroneRaycastPlayer.ProjectionState savedState = player.CaptureProjectionState();
+        Camera candidateCamera = null;
+#if UNITY_EDITOR
+        SceneDirtinessState dirtiness = SceneDirtinessState.Capture(player, player.DroneViewCamera);
+#endif
+        try
+        {
+            if (!player.TryPrepareForGeoreferencing(out string preparationError))
+            {
+                Debug.LogError(
+                    $"[TopViewSplatProjector] Preview preparation failed: {preparationError}", this);
+                return;
+            }
+            if (!TryCreateTopViewCamera(
+                    out candidateCamera, out TopViewContext context, out string cameraError))
+            {
+                Debug.LogError(
+                    $"[TopViewSplatProjector] Preview setup failed: {cameraError}", this);
+                return;
+            }
+
+            StopGameViewPreview();
+            candidateCamera.gameObject.name = "TopViewGamePreviewCamera";
+            candidateCamera.gameObject.hideFlags = HideFlags.DontSave;
+            candidateCamera.targetTexture = null;
+            candidateCamera.targetDisplay = 0;
+            candidateCamera.rect = new Rect(0f, 0f, 1f, 1f);
+            candidateCamera.depth = Mathf.Max(1000f, player.DroneViewCamera.depth + 100f);
+            candidateCamera.enabled = true;
+            gameViewPreviewCamera = candidateCamera;
+            candidateCamera = null;
+
+            Debug.Log(
+                $"[TopViewSplatProjector] Game View preview is active at " +
+                $"{context.ImageWidth}x{context.ImageHeight} ({context.ProjectionName}, " +
+                $"image rotation {FormatSigned(context.ImageRotationDegrees)} degrees). " +
+                "Choose the same aspect ratio in the Game View for an unstretched preview.",
+                this);
+#if UNITY_EDITOR
+            FocusGameView();
+#endif
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError(
+                $"[TopViewSplatProjector] Preview aborted by an unexpected error: " +
+                $"{exception.Message}",
+                this);
+        }
+        finally
+        {
+            DestroyTemporaryCamera(candidateCamera);
+            player.RestoreProjectionState(savedState);
+            Physics.SyncTransforms();
+#if UNITY_EDITOR
+            dirtiness.Restore();
+#endif
+        }
+    }
+
+    [ContextMenu("0b. Stop Game View Preview")]
+    public void StopGameViewPreview()
+    {
+        DestroyTemporaryCamera(gameViewPreviewCamera);
+        gameViewPreviewCamera = null;
+    }
 
     [ContextMenu("1. Capture Top View Splat PNG")]
     public void CaptureTopViewSplatPng()
@@ -184,6 +265,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             return Fail("Reference Frame Count must be at least 1.", out error);
         if (!IsFinite(heightOffsetMeters))
             return Fail("Height Offset Metres must be finite.", out error);
+        if (!IsFinite(imageRotationDegrees))
+            return Fail("Image Rotation Degrees must be finite.", out error);
         if (captureWidth < 64 || captureHeight < 64)
             return Fail("Capture dimensions must both be at least 64 pixels.", out error);
         if (!player.TryConfigureForFrameCnt(referenceFrameCount, out string configureError))
@@ -227,7 +310,24 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ? Mathf.Max(64, Mathf.RoundToInt(imageWidth / srtAspect))
             : Mathf.Max(64, captureHeight);
         float outputAspect = (float)imageWidth / imageHeight;
-        Quaternion rotation = Quaternion.LookRotation(-worldUp, worldNorth);
+        Vector3 baseImageUp = Vector3.ProjectOnPlane(
+            gaussianSplatRenderer != null
+                ? gaussianSplatRenderer.transform.forward
+                : Vector3.forward,
+            worldUp);
+        string imageAlignment = gaussianSplatRenderer != null
+            ? "gaussian_splat_local_forward"
+            : "unity_world_forward";
+        if (baseImageUp.sqrMagnitude <= 0.000001f)
+        {
+            baseImageUp = Vector3.ProjectOnPlane(Vector3.right, worldUp);
+            imageAlignment += "_right_fallback";
+        }
+        if (baseImageUp.sqrMagnitude <= 0.000001f)
+            return Fail("Could not derive a horizontal image-alignment axis.", out error);
+        baseImageUp.Normalize();
+        Vector3 imageUp = Quaternion.AngleAxis(imageRotationDegrees, worldUp) * baseImageUp;
+        Quaternion rotation = Quaternion.LookRotation(-worldUp, imageUp);
         Vector3 cameraPosition = centreHit.point + upMetre * finalHeightMeters;
         GameObject cameraObject = new GameObject("TopViewSplatCamera")
         {
@@ -313,6 +413,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             cameraPosition,
             rotation,
             projectionName,
+            imageAlignment,
+            imageUp,
             imageWidth,
             imageHeight,
             effectiveWidthWorld / Mathf.Max(eastMetre.magnitude, 0.000001f),
@@ -320,6 +422,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             referenceHeightMeters,
             finalHeightMeters,
             heightOffsetMeters,
+            imageRotationDegrees,
             topCamera.fieldOfView,
             topCamera.focalLength,
             topCamera.sensorSize,
@@ -451,11 +554,13 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["width_px"] = context.ImageWidth,
             ["height_px"] = context.ImageHeight,
             ["projection"] = context.ProjectionName,
+            ["image_alignment"] = context.ImageAlignment,
             ["estimated_centre_plane_coverage_width_m"] = context.CoverageWidthMeters,
             ["estimated_centre_plane_coverage_height_m"] = context.CoverageHeightMeters,
             ["reference_drone_height_above_centre_m"] = context.ReferenceHeightMeters,
             ["height_offset_m"] = context.HeightOffsetMeters,
             ["final_camera_height_above_centre_m"] = context.FinalHeightMeters,
+            ["image_rotation_degrees_from_alignment"] = context.ImageRotationDegrees,
             ["vertical_fov_degrees"] = context.VerticalFieldOfViewDegrees,
             ["focal_length_mm"] = context.FocalLengthMillimetres,
             ["sensor_size_mm"] = new JArray(context.SensorSizeMillimetres.x, context.SensorSizeMillimetres.y),
@@ -465,6 +570,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["centre_world"] = VectorToJson(context.CentreWorld),
             ["camera_world"] = VectorToJson(context.CameraWorld),
             ["camera_rotation_xyzw"] = QuaternionToJson(context.CameraRotation),
+            ["image_up_world"] = VectorToJson(context.ImageUpWorld),
             ["world_east"] = VectorToJson(context.WorldEast),
             ["world_north"] = VectorToJson(context.WorldNorth),
             ["world_up"] = VectorToJson(context.WorldUp)
@@ -569,6 +675,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                 ["coordinate_space"] = Wgs84CoordinateSpace,
                 ["source"] = context.ProjectionName + "_top_view_mask_raycast",
                 ["projection"] = context.ProjectionName,
+                ["image_alignment"] = context.ImageAlignment,
                 ["class"] = polygonClassName,
                 ["reference_frame_cnt"] = referenceFrameCount,
                 ["capture_width_px"] = context.ImageWidth,
@@ -578,6 +685,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                 ["reference_drone_height_above_centre_m"] = context.ReferenceHeightMeters,
                 ["height_offset_m"] = context.HeightOffsetMeters,
                 ["final_camera_height_above_centre_m"] = context.FinalHeightMeters,
+                ["image_rotation_degrees_from_alignment"] = context.ImageRotationDegrees,
                 ["vertical_fov_degrees"] = context.VerticalFieldOfViewDegrees,
                 ["focal_length_mm"] = context.FocalLengthMillimetres,
                 ["orthographic_size_world_units"] = context.OrthographicSizeWorld,
@@ -1241,6 +1349,23 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         return value.ToString("+0.###;-0.###;0", CultureInfo.InvariantCulture);
     }
 
+    private void OnDisable()
+    {
+        StopGameViewPreview();
+    }
+
+#if UNITY_EDITOR
+    private static void FocusGameView()
+    {
+        Type gameViewType = Type.GetType("UnityEditor.GameView,UnityEditor");
+        if (gameViewType == null)
+            return;
+        UnityEditor.EditorWindow gameView = UnityEditor.EditorWindow.GetWindow(gameViewType);
+        if (gameView != null)
+            gameView.Focus();
+    }
+#endif
+
     private static bool Fail(string message, out string error)
     {
         error = message;
@@ -1253,6 +1378,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         public readonly Vector3 CameraWorld;
         public readonly Quaternion CameraRotation;
         public readonly string ProjectionName;
+        public readonly string ImageAlignment;
+        public readonly Vector3 ImageUpWorld;
         public readonly int ImageWidth;
         public readonly int ImageHeight;
         public readonly float CoverageWidthMeters;
@@ -1260,6 +1387,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         public readonly float ReferenceHeightMeters;
         public readonly float FinalHeightMeters;
         public readonly float HeightOffsetMeters;
+        public readonly float ImageRotationDegrees;
         public readonly float VerticalFieldOfViewDegrees;
         public readonly float FocalLengthMillimetres;
         public readonly Vector2 SensorSizeMillimetres;
@@ -1274,6 +1402,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             Vector3 cameraWorld,
             Quaternion cameraRotation,
             string projectionName,
+            string imageAlignment,
+            Vector3 imageUpWorld,
             int imageWidth,
             int imageHeight,
             float coverageWidthMeters,
@@ -1281,6 +1411,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             float referenceHeightMeters,
             float finalHeightMeters,
             float heightOffsetMeters,
+            float imageRotationDegrees,
             float verticalFieldOfViewDegrees,
             float focalLengthMillimetres,
             Vector2 sensorSizeMillimetres,
@@ -1294,6 +1425,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             CameraWorld = cameraWorld;
             CameraRotation = cameraRotation;
             ProjectionName = projectionName;
+            ImageAlignment = imageAlignment;
+            ImageUpWorld = imageUpWorld;
             ImageWidth = imageWidth;
             ImageHeight = imageHeight;
             CoverageWidthMeters = coverageWidthMeters;
@@ -1301,6 +1434,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ReferenceHeightMeters = referenceHeightMeters;
             FinalHeightMeters = finalHeightMeters;
             HeightOffsetMeters = heightOffsetMeters;
+            ImageRotationDegrees = imageRotationDegrees;
             VerticalFieldOfViewDegrees = verticalFieldOfViewDegrees;
             FocalLengthMillimetres = focalLengthMillimetres;
             SensorSizeMillimetres = sensorSizeMillimetres;
