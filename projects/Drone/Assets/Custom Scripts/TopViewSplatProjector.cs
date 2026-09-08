@@ -813,6 +813,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         for (int i = 0; i < projected.Count; i++)
             ring.Add(new JArray(projected[i].Longitude, projected[i].Latitude));
         ring.Add(new JArray(projected[0].Longitude, projected[0].Latitude));
+        var polygonCoordinates = new JArray();
+        polygonCoordinates.Add(ring);
         feature = new JObject
         {
             ["type"] = "Feature",
@@ -834,7 +836,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["geometry"] = new JObject
             {
                 ["type"] = "Polygon",
-                ["coordinates"] = new JArray(ring)
+                ["coordinates"] = polygonCoordinates
             }
         };
         return true;
