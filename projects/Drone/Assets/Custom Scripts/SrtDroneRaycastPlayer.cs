@@ -404,6 +404,48 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         return IsFinite(longitude) && IsFinite(latitude) && IsFinite(altitude);
     }
 
+    /// <summary>
+    /// Converts an ENU offset expressed in metres to the corresponding world-space vector.
+    /// This preserves the COLMAP similarity scale and the Map Root transform, so callers can
+    /// construct geographically aligned cameras without assuming that Unity Y is geodetic up.
+    /// </summary>
+    public bool TryConvertEnuOffsetToWorldVector(Vector3 enuOffsetMeters, out Vector3 worldVector)
+    {
+        worldVector = Vector3.zero;
+        if (!GeoUtils.IsValidTransformData(transformData) || !IsFinite(enuOffsetMeters))
+            return false;
+
+        Vector3 colmapVector = EnuToColmapDirection(enuOffsetMeters) /
+                               transformData.colmap_to_enu.scale;
+        if (flipPositionX)
+            colmapVector.x = -colmapVector.x;
+        if (flipPositionY)
+            colmapVector.y = -colmapVector.y;
+
+        worldVector = mapRoot != null
+            ? mapRoot.TransformVector(colmapVector)
+            : colmapVector;
+        return IsFinite(worldVector) && worldVector.sqrMagnitude > 0.00000001f;
+    }
+
+    /// <summary>
+    /// Returns normalized world-space East, North and Up directions for the active map.
+    /// </summary>
+    public bool TryGetWorldEnuAxes(
+        out Vector3 worldEast, out Vector3 worldNorth, out Vector3 worldUp)
+    {
+        worldEast = worldNorth = worldUp = Vector3.zero;
+        if (!TryConvertEnuOffsetToWorldVector(EnuEast, out Vector3 east) ||
+            !TryConvertEnuOffsetToWorldVector(EnuNorth, out Vector3 north) ||
+            !TryConvertEnuOffsetToWorldVector(EnuUp, out Vector3 up))
+            return false;
+
+        worldEast = east.normalized;
+        worldNorth = north.normalized;
+        worldUp = up.normalized;
+        return true;
+    }
+
     private void ConfigurePose(SrtFrame frame, bool drawCentralRay)
     {
         BuildRayOriginAndDirection(frame, out Vector3 worldPos, out Vector3 worldDirection, out Vector3 rayOrigin);
