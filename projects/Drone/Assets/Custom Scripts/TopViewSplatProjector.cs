@@ -7,25 +7,10 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
-public enum TopViewCameraProjectionMode
-{
-    SrtPerspective = 0,
-    Orthographic = 1
-}
-
-public enum TopViewCameraHeightMode
-{
-    SrtReferencePlusOffset = 0,
-    FixedUnityUnitsAboveCentre = 1
-}
-
 /// <summary>
-/// Experimental single-view pipeline:
+/// Top-view pipeline:
 /// first-frame centre ray -> geodetic top camera -> Gaussian-splat PNG -> top-view masks ->
 /// one WGS84 polygon per connected mask component.
-///
-/// This component is intentionally independent from MaskRaycastProjector. It lets the top-view
-/// approach be evaluated without changing the established four-view workflow.
 /// </summary>
 public sealed class TopViewSplatProjector : MonoBehaviour
 {
@@ -33,41 +18,24 @@ public sealed class TopViewSplatProjector : MonoBehaviour
 
     [Header("1. References")]
     [SerializeField] private SrtDroneRaycastPlayer player;
-    [Tooltip("Optional. Used to fit Orthographic mode automatically around the splat bounds.")]
+    [Tooltip("Aligns the top of the captured image with the splat's local Forward axis.")]
     [SerializeField] private GaussianSplatRenderer gaussianSplatRenderer;
 
     [Header("2. Top-view camera")]
     [Min(1)]
     [Tooltip("SRT FrameCnt used to cast the centre ray. FrameCnt starts at 1.")]
     [SerializeField] private int referenceFrameCount = 1;
-    [Tooltip("Srt Perspective preserves the configured SRT camera lens. Orthographic uses parallel top-down rays and the coverage settings below.")]
-    [SerializeField] private TopViewCameraProjectionMode projectionMode =
-        TopViewCameraProjectionMode.SrtPerspective;
-    [Tooltip("Choose whether camera height follows the reference SRT altitude or uses a fixed Unity-world distance above the centre hit.")]
-    [SerializeField] private TopViewCameraHeightMode heightMode =
-        TopViewCameraHeightMode.SrtReferencePlusOffset;
     [Tooltip("Metres added to or subtracted from the reference drone-camera altitude. Zero preserves the SRT-derived altitude.")]
     [SerializeField] private float heightOffsetMeters;
-    [Min(0.0001f)]
-    [Tooltip("Used only by Fixed Unity Units Above Centre. This is a direct Unity-world distance and does not depend on the SRT drone altitude.")]
-    [SerializeField] private float fixedHeightUnityUnits = 1.5f;
     [Range(-180f, 180f)]
     [Tooltip("Rotation around geodetic Up after aligning the image with the splat's local Forward axis (or Unity world Forward when no splat renderer is assigned).")]
     [SerializeField] private float imageRotationDegrees;
-    [Header("2a. Orthographic coverage")]
-    [SerializeField] private bool autoFitGaussianBounds = true;
-    [Range(0f, 1f)] [SerializeField] private float boundsPaddingFraction = 0.05f;
-    [Min(0.1f)] [SerializeField] private float manualCoverageWidthMeters = 250f;
-    [Min(0.1f)] [SerializeField] private float manualCoverageHeightMeters = 250f;
     [Tooltip("Ordinary scene geometry is hidden by default; Gaussian splats are rendered by the URP feature independently of this mask.")]
     [SerializeField] private LayerMask captureSceneLayers = 0;
     [SerializeField] private Color captureBackground = Color.black;
 
     [Header("3. Top-view capture")]
     [Min(64)] [SerializeField] private int captureWidth = 2048;
-    [Tooltip("Derive capture height from the SRT-configured camera aspect ratio. Recommended for an exact camera match.")]
-    [SerializeField] private bool matchSrtCameraAspect = true;
-    [Min(64)] [SerializeField] private int captureHeight = 2048;
     [SerializeField] private string capturePngPath = "Exports/top_view_splat.png";
     [SerializeField] private SrtDroneRaycastPlayer.FilePathRoot capturePathRoot =
         SrtDroneRaycastPlayer.FilePathRoot.ProjectRoot;
@@ -77,8 +45,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     [SerializeField] private string maskPath = "Exports/top_view_masks";
     [SerializeField] private SrtDroneRaycastPlayer.FilePathRoot maskPathRoot =
         SrtDroneRaycastPlayer.FilePathRoot.ProjectRoot;
-    [Tooltip("Leave empty to process every PNG/JPG in the directory.")]
-    [SerializeField] private string maskFileNameContains = "mask";
     [SerializeField] private string polygonClassName = "building";
     [Range(0f, 1f)] [SerializeField] private float foregroundThreshold = 0.5f;
     [SerializeField] private bool useAlphaAsForeground;
@@ -227,7 +193,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                     $"{context.ProjectionName} top view to '{path}'. Centre is the FrameCnt " +
                     $"{referenceFrameCount} central-ray hit; estimated centre-plane coverage is " +
                     $"{Format(context.CoverageWidthMeters)} x {Format(context.CoverageHeightMeters)} m. " +
-                    $"Height mode is {context.HeightModeName}; final height is " +
+                    $"Height uses the SRT reference plus offset; final height is " +
                     $"{Format(context.FinalHeightWorldUnits)} Unity units " +
                     $"({Format(context.FinalHeightMeters)} geodetic m) above the centre hit.",
                     this);
@@ -275,16 +241,12 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         error = string.Empty;
         if (referenceFrameCount < 1)
             return Fail("Reference Frame Count must be at least 1.", out error);
-        if (heightMode == TopViewCameraHeightMode.SrtReferencePlusOffset &&
-            !IsFinite(heightOffsetMeters))
+        if (!IsFinite(heightOffsetMeters))
             return Fail("Height Offset Metres must be finite.", out error);
-        if (heightMode == TopViewCameraHeightMode.FixedUnityUnitsAboveCentre &&
-            (!IsFinite(fixedHeightUnityUnits) || fixedHeightUnityUnits <= 0.0001f))
-            return Fail("Fixed Height Unity Units must be finite and greater than zero.", out error);
         if (!IsFinite(imageRotationDegrees))
             return Fail("Image Rotation Degrees must be finite.", out error);
-        if (captureWidth < 64 || captureHeight < 64)
-            return Fail("Capture dimensions must both be at least 64 pixels.", out error);
+        if (captureWidth < 64)
+            return Fail("Capture Width must be at least 64 pixels.", out error);
         if (!player.TryConfigureForFrameCnt(referenceFrameCount, out string configureError))
             return Fail($"Cannot configure FrameCnt {referenceFrameCount}: {configureError}", out error);
 
@@ -311,34 +273,17 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         if (!IsFinite(referenceHeightMeters))
             return Fail("The SRT reference height above the centre hit is invalid.", out error);
 
-        float appliedHeightOffsetMeters = 0f;
-        float finalHeightMeters;
-        float finalHeightWorldUnits;
-        string heightModeName;
-        if (heightMode == TopViewCameraHeightMode.FixedUnityUnitsAboveCentre)
-        {
-            finalHeightWorldUnits = fixedHeightUnityUnits;
-            finalHeightMeters = finalHeightWorldUnits / upWorldUnitsPerMetre;
-            heightModeName = "fixed_unity_units_above_centre";
-        }
-        else
-        {
-            appliedHeightOffsetMeters = heightOffsetMeters;
-            finalHeightMeters = referenceHeightMeters + appliedHeightOffsetMeters;
-            finalHeightWorldUnits = finalHeightMeters * upWorldUnitsPerMetre;
-            heightModeName = "srt_reference_plus_offset";
-        }
+        float finalHeightMeters = referenceHeightMeters + heightOffsetMeters;
+        float finalHeightWorldUnits = finalHeightMeters * upWorldUnitsPerMetre;
         if (!IsFinite(finalHeightMeters) || !IsFinite(finalHeightWorldUnits) ||
             finalHeightMeters <= 0.1f || finalHeightWorldUnits <= 0.0001f)
-            return Fail("The selected height mode does not place the top camera above the centre hit.", out error);
+            return Fail("The SRT reference height plus offset does not place the top camera above the centre hit.", out error);
 
         int imageWidth = Mathf.Max(64, captureWidth);
         float srtAspect = sourceCamera.aspect;
         if (!IsFinite(srtAspect) || srtAspect <= 0f)
             return Fail("The SRT-configured Drone View Camera has an invalid aspect ratio.", out error);
-        int imageHeight = matchSrtCameraAspect
-            ? Mathf.Max(64, Mathf.RoundToInt(imageWidth / srtAspect))
-            : Mathf.Max(64, captureHeight);
+        int imageHeight = Mathf.Max(64, Mathf.RoundToInt(imageWidth / srtAspect));
         float outputAspect = (float)imageWidth / imageHeight;
         Vector3 baseImageUp = Vector3.ProjectOnPlane(
             gaussianSplatRenderer != null
@@ -375,75 +320,20 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         float centreDistanceWorld = Vector3.Distance(cameraPosition, centreHit.point);
         float effectiveWidthWorld;
         float effectiveHeightWorld;
-        float orthographicSizeWorld = 0f;
-        if (projectionMode == TopViewCameraProjectionMode.Orthographic)
-        {
-            if (autoFitGaussianBounds && gaussianSplatRenderer != null &&
-                gaussianSplatRenderer.asset != null)
-            {
-                CalculateSplatHalfExtents(
-                    gaussianSplatRenderer,
-                    centreHit.point,
-                    rotation * Vector3.right,
-                    rotation * Vector3.up,
-                    out float halfWidthWorld,
-                    out float halfHeightWorld);
-                float paddingMultiplier = 1f + Mathf.Clamp01(boundsPaddingFraction);
-                effectiveWidthWorld = halfWidthWorld * paddingMultiplier * 2f;
-                effectiveHeightWorld = halfHeightWorld * paddingMultiplier * 2f;
-            }
-            else
-            {
-                if (manualCoverageWidthMeters <= 0f || manualCoverageHeightMeters <= 0f ||
-                    !IsFinite(manualCoverageWidthMeters) || !IsFinite(manualCoverageHeightMeters))
-                {
-                    DestroyTemporaryCamera(topCamera);
-                    topCamera = null;
-                    return Fail(
-                        "Manual orthographic coverage dimensions must be finite and greater than zero.",
-                        out error);
-                }
-                effectiveWidthWorld = eastMetre.magnitude * manualCoverageWidthMeters;
-                effectiveHeightWorld = northMetre.magnitude * manualCoverageHeightMeters;
-            }
-
-            if (effectiveWidthWorld <= 0.000001f || effectiveHeightWorld <= 0.000001f)
-            {
-                DestroyTemporaryCamera(topCamera);
-                topCamera = null;
-                return Fail("The calculated orthographic top-view coverage is empty.", out error);
-            }
-
-            topCamera.usePhysicalProperties = false;
-            topCamera.orthographic = true;
-            orthographicSizeWorld = Mathf.Max(
-                effectiveHeightWorld * 0.5f,
-                effectiveWidthWorld * 0.5f / outputAspect);
-            topCamera.orthographicSize = orthographicSizeWorld;
-            effectiveWidthWorld = orthographicSizeWorld * outputAspect * 2f;
-            effectiveHeightWorld = orthographicSizeWorld * 2f;
-        }
-        else
-        {
-            topCamera.orthographic = false;
-            float halfHeightWorld = centreDistanceWorld *
-                                    Mathf.Tan(topCamera.fieldOfView * Mathf.Deg2Rad * 0.5f);
-            effectiveHeightWorld = halfHeightWorld * 2f;
-            effectiveWidthWorld = effectiveHeightWorld * outputAspect;
-        }
+        topCamera.orthographic = false;
+        float halfHeightWorld = centreDistanceWorld *
+                                Mathf.Tan(topCamera.fieldOfView * Mathf.Deg2Rad * 0.5f);
+        effectiveHeightWorld = halfHeightWorld * 2f;
+        effectiveWidthWorld = effectiveHeightWorld * outputAspect;
 
         topCamera.farClipPlane = Mathf.Max(
             sourceCamera.farClipPlane,
-            centreDistanceWorld * 4f + orthographicSizeWorld * 2f);
-        string projectionName = projectionMode == TopViewCameraProjectionMode.Orthographic
-            ? "orthographic"
-            : "srt_perspective";
+            centreDistanceWorld * 4f);
         context = new TopViewContext(
             centreHit.point,
             cameraPosition,
             rotation,
-            projectionName,
-            heightModeName,
+            "srt_perspective",
             imageAlignment,
             imageUp,
             imageWidth,
@@ -452,48 +342,17 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             effectiveHeightWorld / Mathf.Max(northMetre.magnitude, 0.000001f),
             referenceHeightMeters,
             finalHeightMeters,
-            appliedHeightOffsetMeters,
+            heightOffsetMeters,
             finalHeightWorldUnits,
             imageRotationDegrees,
             topCamera.fieldOfView,
             topCamera.focalLength,
             topCamera.sensorSize,
             topCamera.usePhysicalProperties,
-            orthographicSizeWorld,
             worldEast,
             worldNorth,
             worldUp);
         return true;
-    }
-
-    private static void CalculateSplatHalfExtents(
-        GaussianSplatRenderer renderer,
-        Vector3 centre,
-        Vector3 cameraRight,
-        Vector3 cameraUp,
-        out float halfWidth,
-        out float halfHeight)
-    {
-        Vector3 minimum = renderer.asset.boundsMin;
-        Vector3 maximum = renderer.asset.boundsMax;
-        halfWidth = 0f;
-        halfHeight = 0f;
-        for (int x = 0; x < 2; x++)
-        {
-            for (int y = 0; y < 2; y++)
-            {
-                for (int z = 0; z < 2; z++)
-                {
-                    Vector3 local = new Vector3(
-                        x == 0 ? minimum.x : maximum.x,
-                        y == 0 ? minimum.y : maximum.y,
-                        z == 0 ? minimum.z : maximum.z);
-                    Vector3 offset = renderer.transform.TransformPoint(local) - centre;
-                    halfWidth = Mathf.Max(halfWidth, Mathf.Abs(Vector3.Dot(offset, cameraRight)));
-                    halfHeight = Mathf.Max(halfHeight, Mathf.Abs(Vector3.Dot(offset, cameraUp)));
-                }
-            }
-        }
     }
 
     private bool TryCapturePng(
@@ -586,7 +445,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["width_px"] = context.ImageWidth,
             ["height_px"] = context.ImageHeight,
             ["projection"] = context.ProjectionName,
-            ["height_mode"] = context.HeightModeName,
+            ["height_mode"] = "srt_reference_plus_offset",
             ["image_alignment"] = context.ImageAlignment,
             ["estimated_centre_plane_coverage_width_m"] = context.CoverageWidthMeters,
             ["estimated_centre_plane_coverage_height_m"] = context.CoverageHeightMeters,
@@ -599,7 +458,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             ["focal_length_mm"] = context.FocalLengthMillimetres,
             ["sensor_size_mm"] = new JArray(context.SensorSizeMillimetres.x, context.SensorSizeMillimetres.y),
             ["uses_physical_camera"] = context.UsesPhysicalCamera,
-            ["orthographic_size_world_units"] = context.OrthographicSizeWorld,
             ["centre_wgs84"] = new JArray(centreLongitude, centreLatitude, centreAltitude),
             ["centre_world"] = VectorToJson(context.CentreWorld),
             ["camera_world"] = VectorToJson(context.CameraWorld),
@@ -709,7 +567,7 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                 ["coordinate_space"] = Wgs84CoordinateSpace,
                 ["source"] = context.ProjectionName + "_top_view_mask_raycast",
                 ["projection"] = context.ProjectionName,
-                ["height_mode"] = context.HeightModeName,
+                ["height_mode"] = "srt_reference_plus_offset",
                 ["image_alignment"] = context.ImageAlignment,
                 ["class"] = polygonClassName,
                 ["reference_frame_cnt"] = referenceFrameCount,
@@ -724,7 +582,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
                 ["image_rotation_degrees_from_alignment"] = context.ImageRotationDegrees,
                 ["vertical_fov_degrees"] = context.VerticalFieldOfViewDegrees,
                 ["focal_length_mm"] = context.FocalLengthMillimetres,
-                ["orthographic_size_world_units"] = context.OrthographicSizeWorld,
                 ["centre_wgs84"] = new JArray(centreLongitude, centreLatitude, centreAltitude),
                 ["mask_file_count"] = files.Count,
                 ["connected_component_count"] = discoveredComponents,
@@ -1206,10 +1063,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         {
             if (!IsSupportedImagePath(discovered[i]))
                 continue;
-            if (!string.IsNullOrWhiteSpace(maskFileNameContains) &&
-                Path.GetFileName(discovered[i]).IndexOf(
-                    maskFileNameContains, StringComparison.OrdinalIgnoreCase) < 0)
-                continue;
             files.Add(discovered[i]);
         }
         files.Sort(StringComparer.OrdinalIgnoreCase);
@@ -1416,7 +1269,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         public readonly Vector3 CameraWorld;
         public readonly Quaternion CameraRotation;
         public readonly string ProjectionName;
-        public readonly string HeightModeName;
         public readonly string ImageAlignment;
         public readonly Vector3 ImageUpWorld;
         public readonly int ImageWidth;
@@ -1432,7 +1284,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         public readonly float FocalLengthMillimetres;
         public readonly Vector2 SensorSizeMillimetres;
         public readonly bool UsesPhysicalCamera;
-        public readonly float OrthographicSizeWorld;
         public readonly Vector3 WorldEast;
         public readonly Vector3 WorldNorth;
         public readonly Vector3 WorldUp;
@@ -1442,7 +1293,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             Vector3 cameraWorld,
             Quaternion cameraRotation,
             string projectionName,
-            string heightModeName,
             string imageAlignment,
             Vector3 imageUpWorld,
             int imageWidth,
@@ -1458,7 +1308,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             float focalLengthMillimetres,
             Vector2 sensorSizeMillimetres,
             bool usesPhysicalCamera,
-            float orthographicSizeWorld,
             Vector3 worldEast,
             Vector3 worldNorth,
             Vector3 worldUp)
@@ -1467,7 +1316,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             CameraWorld = cameraWorld;
             CameraRotation = cameraRotation;
             ProjectionName = projectionName;
-            HeightModeName = heightModeName;
             ImageAlignment = imageAlignment;
             ImageUpWorld = imageUpWorld;
             ImageWidth = imageWidth;
@@ -1483,7 +1331,6 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             FocalLengthMillimetres = focalLengthMillimetres;
             SensorSizeMillimetres = sensorSizeMillimetres;
             UsesPhysicalCamera = usesPhysicalCamera;
-            OrthographicSizeWorld = orthographicSizeWorld;
             WorldEast = worldEast;
             WorldNorth = worldNorth;
             WorldUp = worldUp;

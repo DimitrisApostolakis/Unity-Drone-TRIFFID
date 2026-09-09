@@ -1,123 +1,82 @@
-# Top-view splat polygon experiment
+# Top-view splat polygon pipeline
 
-`TopViewSplatProjector` is an independent experiment. It does not change the existing
-four-view `MaskRaycastProjector` workflow.
+The Unity scene now contains one focused workflow:
 
-The experiment uses this sequence:
+1. `SrtDroneRaycastPlayer` loads the DJI SRT and transform JSON.
+2. The centre pixel of the selected SRT frame is raycast onto the map collider.
+3. `TopViewSplatProjector` places an SRT-perspective camera directly above that hit.
+4. Unity captures the Gaussian splat to PNG.
+5. An external segmentation model produces one or more top-view masks.
+6. Unity traces every connected foreground component, raycasts its contour and exports a
+   WGS84 GeoJSON polygon.
 
-1. Configure the first SRT frame through `SrtDroneRaycastPlayer`.
-2. Raycast the exact centre pixel of that frame onto the configured map collider.
-3. Place a temporary top-down camera above that surface hit using the map's geodetic
-   East/North/Up axes. Its base height is the SRT-configured drone camera's vertical distance
-   from the centre hit, converted with the transform JSON; a signed metre offset is then added.
-4. Render the Gaussian splat to a PNG.
-5. Run the few-shot segmentation model on that PNG outside Unity.
-6. Load the resulting binary top-view mask(s).
-7. Find four-connected foreground components, trace and simplify each outer contour, and
-   raycast its ordered vertices from the same top-view camera.
-8. Export one WGS84 GeoJSON polygon per accepted connected component.
+## Scene setup
 
-## Unity setup
+The `DroneSimulation` object in `Drone.unity` already contains both required components.
 
-1. Add `TopViewSplatProjector` to the same GameObject as `SrtDroneRaycastPlayer`, or to any
-   other active GameObject.
-2. Assign the existing `SrtDroneRaycastPlayer` to **Player**.
-3. Assign the scene's `GaussianSplatRenderer` to **Gaussian Splat Renderer**. Its local Forward
-   axis aligns the image, and its bounds can also provide automatic `Orthographic` coverage.
-4. Leave **Reference Frame Count** at `1` to use the first SRT frame.
-5. Select **Projection Mode**:
-   - `SrtPerspective` copies the lens, physical sensor, focal length/FOV and aspect from the
-     camera configured from that SRT frame.
-   - `Orthographic` uses parallel rays. Enable **Auto Fit Gaussian Bounds** to fit the splat,
-     or disable it and provide the manual coverage width and height in metres.
-6. Select **Height Mode**:
-   - `SrtReferencePlusOffset` places the camera at the reference SRT altitude and applies
-     **Height Offset Meters** along geodetic Up.
-   - `FixedUnityUnitsAboveCentre` ignores the reference drone altitude and places the camera
-     **Fixed Height Unity Units** above the centre-ray surface hit. This is a direct Unity-world
-     distance; the default `1.5` is close to the current test capture's approximately `1.38`
-     world-unit height.
-7. Leave **Image Rotation Degrees** at `0` to align the image with the splat's local Forward
-   axis. A non-zero value adds a manual rotation around geodetic Up.
-8. Keep **Capture Scene Layers** empty (`Nothing`) when only the splat should appear. The
-   Gaussian URP render feature is independent of the ordinary camera culling mask, while the
-   visible collider mesh is thereby excluded from the capture.
-9. Set an output including the `.png` filename, such as
-   `D:\TRIFFID\outputs\orbit_01\top_view_splat.png`, in **Capture Png Path**. Absolute paths
-   ignore the selected path root; a directory by itself is not a valid capture path.
-10. Open the component's context menu and run **1. Capture Top View Splat PNG**.
+### SrtDroneRaycastPlayer
 
-## Game View preview
+- Assign the DJI `.srt` file and the matching transform `.json`.
+- Assign **Map Root**, **Target Collider**, and **Drone View Camera**.
+- Keep **Estimate Fov From Focal Length** enabled when the SRT provides `focal_len`.
+- Use the alignment and gimbal correction values that align the SRT centre ray with the splat.
+- Enable **Raycast Target Only** if the top-view rays must be restricted to the assigned collider.
 
-Before capturing, open the component context menu and run **0. Show Or Refresh Game View
-Preview**. Unity creates a non-saved `TopViewGamePreviewCamera`, enables it at a high camera
-depth and focuses the Game View. The preview uses the same projection, position, lens,
-orientation, culling mask and background as the PNG capture.
+### TopViewSplatProjector
 
-Choose a Game View aspect matching the reported capture dimensions—for example `16:9` for
-`2048x1152`—to avoid display stretching. After changing projection, height, rotation or
-coverage, run the preview command again. Use **0b. Stop Game View Preview** when finished; the
-preview camera is also removed automatically when the component is disabled.
+- **Player**: the `SrtDroneRaycastPlayer` on `DroneSimulation`.
+- **Gaussian Splat Renderer**: the active splat renderer. Its local Forward axis defines the top
+  of the captured image.
+- **Reference Frame Count**: the SRT `FrameCnt` whose centre ray defines the capture centre.
+- **Height Offset Meters**: signed geodetic metres added to the reference SRT camera height.
+  The final height above the centre hit is `reference SRT height + offset`.
+- **Image Rotation Degrees**: optional rotation around geodetic Up; normally `0`.
+- **Capture Width**: output width. Height is always derived from the configured SRT camera
+  aspect ratio so the image and raycasting camera stay identical.
 
-At **Image Rotation Degrees = 0**, the top of the image follows the assigned splat's projected
-local Forward axis. If no renderer is assigned, Unity world Forward is used. The camera still
-looks straight down along geodetic Up; only the image-plane orientation changes.
+The top-view camera always uses the lens, sensor/FOV and perspective projection configured from
+the selected SRT frame. Orthographic and fixed-Unity-height modes are intentionally not part of
+this pipeline.
 
-The component also writes `top_view_splat.png.json`. It records the centre, camera pose,
-coverage, orientation and resolution used for the image. Polygon projection currently rebuilds
-that camera from the current Inspector settings rather than reading the manifest, so do not
-change those settings between capture and mask projection.
+## Capture and preview
 
-## Mask requirements
+Use the component context menu in this order:
 
-- The mask must be generated from the captured PNG without resizing, cropping, padding,
-  rotation or mirroring.
-- Its width and height must exactly match the captured PNG. When **Match SRT Camera Aspect**
-  is enabled, the component derives the output height from **Capture Width** and the SRT camera
-  aspect, so the Inspector's **Capture Height** is not used.
-- PNG, JPG and JPEG are accepted. PNG is preferable because JPEG artefacts can modify the
-  contour.
-- By default a pixel is foreground when the maximum RGB channel is at least `0.5`.
-- Enable **Use Alpha As Foreground** for masks stored in the alpha channel.
-- Enable **Invert Foreground** for black-foreground/white-background masks.
-- A single aggregate semantic mask is supported: every connected region becomes a separate
-  candidate polygon. Separate instance masks are also supported.
+1. **0. Show Or Refresh Game View Preview**
+2. **1. Capture Top View Splat PNG**
+3. Run segmentation on the captured PNG without resizing, cropping, padding, rotation or
+   mirroring it.
+4. **2. Project Top View Masks To Polygons**
+5. **0b. Stop Game View Preview** when the preview is no longer needed.
 
-## Polygon test
+Both capture and polygon paths must include a filename, for example:
 
-1. Put the few-shot output mask(s) in a dedicated directory.
-2. Set **Mask Path** to that file or directory.
-3. Set **Mask File Name Contains** to `mask`, or leave it empty to read every supported image.
-4. Set **Polygon Class Name**, initially `building`.
-5. Set **Polygon Geo Json Path** to the desired output.
-6. Run **2. Project Top View Masks To Polygons** from the component context menu.
+- `D:\TRIFFID\outputs\top_view_splat.png`
+- `D:\TRIFFID\outputs\top_view_polygons.geojson`
 
-The output contains two-dimensional GeoJSON positions in `[longitude, latitude]` order. The
-mean raycast altitude is retained as a feature property instead of being placed in the polygon
-coordinates.
+The capture also writes a `.png.json` manifest containing the exact camera pose, lens,
+orientation, height and image dimensions. Do not change those Inspector settings between the
+capture and polygon export; regenerate the image and masks after any camera change.
 
-## First-test values
+## Mask input
 
-| Setting | Suggested value |
-|---|---:|
-| Reference Frame Count | `1` |
-| Projection Mode | `SrtPerspective` |
-| Height Mode | `FixedUnityUnitsAboveCentre` |
-| Fixed Height Unity Units | `1.5` |
-| Image Rotation Degrees | `0` |
-| Match SRT Camera Aspect | enabled |
-| Capture Width | `2048` |
-| Bounds Padding Fraction | `0.05` |
-| Foreground Threshold | `0.5` |
-| Minimum Component Pixels | `64` |
-| Contour Simplification Pixels | `2` |
-| Contour Inset Pixels | `0.35` |
-| Minimum Successful Ray Fraction | `0.5` |
+- **Mask Path** accepts one PNG/JPG/JPEG or a directory.
+- Every supported image in a directory is processed; filenames do not need to contain `mask`.
+- Image dimensions must exactly match the captured top-view PNG.
+- Separate instance/component files and aggregate semantic masks are both supported.
+- In an aggregate mask, disconnected foreground regions become separate polygons. Touching
+  instances remain one connected component and therefore one polygon.
+- PNG is recommended because JPEG artefacts can alter the contour.
+- Use **Foreground Threshold**, **Use Alpha As Foreground**, and **Invert Foreground** only to
+  match the encoding of the segmentation output.
 
-In `SrtPerspective`, changing the selected height changes both camera altitude and visible
-coverage while preserving the SRT lens. In `Orthographic`, height changes the ray origin but
-coverage comes from auto-fit or the manual coverage values. If auto-fit includes distant splat
-outliers and makes the site too small in the image, disable it and set **Manual Coverage
-Width/Height Metres**. Do not change the projection, height mode/value, resolution, rotation or
-coverage after producing the masks; capture a new image and regenerate the masks whenever
-these settings change.
+## Polygon controls
+
+- **Minimum Component Pixels** rejects tiny disconnected regions.
+- **Contour Simplification Pixels** reduces noisy mask-edge vertices before raycasting.
+- **Maximum Contour Vertices** caps raycast work on very detailed contours.
+- **Contour Inset Pixels** moves edge samples slightly inside the mask.
+- **Minimum Successful Ray Fraction** rejects contours that do not hit enough valid surface.
+
+The exported GeoJSON uses valid two-dimensional `[longitude, latitude]` Polygon coordinates.
+Mean surface altitude and diagnostic counts are stored in each feature's properties.

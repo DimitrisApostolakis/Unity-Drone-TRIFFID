@@ -7,9 +7,8 @@ using Newtonsoft.Json;
 using UnityEngine;
 
 /// <summary>
-/// Parses DJI SRT telemetry and owns the single camera/pose/raycast implementation used by
-/// both live playback and offline georeferencing. This class deliberately has no knowledge
-/// of downstream input or output formats.
+/// Parses DJI SRT telemetry and owns the camera pose and map raycast used by live playback
+/// and the top-view splat projector.
 /// </summary>
 public sealed class SrtDroneRaycastPlayer : MonoBehaviour
 {
@@ -37,13 +36,8 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     [Header("4. Raycast Target")]
     [SerializeField] private float raycastDistance = 5000f;
     [SerializeField] private LayerMask raycastMask = ~0;
-    [SerializeField] private bool requireTargetTag;
-    [SerializeField] private string targetColliderTag = string.Empty;
     [SerializeField] private Collider targetCollider;
     [SerializeField] private bool raycastTargetOnly;
-    [SerializeField] private Vector3 cameraOffsetLocal = Vector3.zero;
-    [SerializeField] private float rayOriginUpOffset;
-    [SerializeField] private float rayOriginForwardOffset;
 
     [Header("5. DJI Gimbal")]
     [SerializeField] private float yawOffsetDegrees;
@@ -53,10 +47,7 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     [SerializeField] private bool flipRoll;
 
     [Header("6. Drone View Camera")]
-    [SerializeField] private Sprite droneSprite;
-    [SerializeField] private float droneSpriteScale = 0.2f;
     [SerializeField] private Camera droneViewCamera;
-    [SerializeField] private bool autoCreateDroneViewCamera;
     [SerializeField] private bool estimateFovFromFocalLength = true;
     [SerializeField] private bool srtFocalLengthIs35mmEquivalent = true;
     [SerializeField] private float sensorHeightMm = 7.66f;
@@ -74,10 +65,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     private bool hasDuplicateFrameCounts;
     private string resolvedSrtPath = string.Empty;
     private string resolvedTransformConfigPath = string.Empty;
-    private SpriteRenderer droneSpriteRenderer;
-    private Camera createdDroneViewCamera;
-    private int sourceFrameWidth;
-    private int sourceFrameHeight;
     private bool loggedInvalidFocalLengthFallback;
 
     private static readonly Regex TimeRegex = new Regex(
@@ -97,9 +84,7 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     private static readonly Vector3 EnuNorth = new Vector3(0f, 1f, 0f);
     private static readonly Vector3 EnuUp = new Vector3(0f, 0f, 1f);
 
-    public int TotalSrtFrameCount => frames.Count;
     public Camera DroneViewCamera => droneViewCamera;
-    public string ResolvedSrtPath => resolvedSrtPath;
 
     private static Regex NumberRegex(string fieldName)
     {
@@ -111,8 +96,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     private void Awake()
     {
         ReloadInputs();
-        EnsureDroneSprite();
-        EnsureDroneViewCamera();
     }
 
     private void Update()
@@ -147,7 +130,7 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     }
 
     [ContextMenu("Reload SRT And Transform")]
-    public void ReloadInputs()
+    private void ReloadInputs()
     {
         ParseSrt();
         LoadTransformConfig();
@@ -162,11 +145,9 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         ParseSrt();
         LoadTransformConfig();
 
-        if (droneViewCamera == null && Application.isPlaying)
-            EnsureDroneViewCamera();
-        if (droneViewCamera == null && !Application.isPlaying)
+        if (droneViewCamera == null)
         {
-            reason = "Drone View Camera must already be assigned for Edit Mode conversion.";
+            reason = "Drone View Camera must be assigned.";
             return false;
         }
 
@@ -182,7 +163,7 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
             Debug.LogError($"[SrtDroneRaycastPlayer] Not ready: {reason}", this);
     }
 
-    public bool TryGetGeoreferencingReadiness(out string reason)
+    private bool TryGetGeoreferencingReadiness(out string reason)
     {
         if (string.IsNullOrWhiteSpace(resolvedSrtPath) || !File.Exists(resolvedSrtPath))
         {
@@ -230,76 +211,7 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
             reason = "Raycast Target Only is enabled but Target Collider is not assigned.";
             return false;
         }
-        if (requireTargetTag && string.IsNullOrWhiteSpace(targetColliderTag))
-        {
-            reason = "Require Target Tag is enabled but Target Collider Tag is empty.";
-            return false;
-        }
-
         reason = string.Empty;
-        return true;
-    }
-
-    public bool TryConfigureSourceFrameDimensions(int frameWidth, int frameHeight, out string reason)
-    {
-        if (frameWidth <= 1 || frameHeight <= 1)
-        {
-            reason = $"Source frame dimensions must both be greater than 1; received {frameWidth}x{frameHeight}.";
-            return false;
-        }
-
-        sourceFrameWidth = frameWidth;
-        sourceFrameHeight = frameHeight;
-        if (droneViewCamera != null)
-            droneViewCamera.aspect = (float)frameWidth / frameHeight;
-        reason = string.Empty;
-        return true;
-    }
-
-    public bool TryMapGeoJsonFrameIndex(int frameIndex, out int frameCnt)
-    {
-        frameCnt = 0;
-        if (frameIndex < 0 || frameIndex == int.MaxValue)
-            return false;
-
-        frameCnt = frameIndex + 1;
-        return frameIndexByCount.ContainsKey(frameCnt);
-    }
-
-    public bool TryGetTelemetryForFrameCnt(int frameCnt, out SrtTelemetry telemetry)
-    {
-        if (frameIndexByCount.TryGetValue(frameCnt, out int index))
-        {
-            telemetry = ToTelemetry(frames[index]);
-            return true;
-        }
-
-        telemetry = default;
-        return false;
-    }
-
-    public bool TryGetInterpolatedTelemetry(double timeSeconds, out SrtTelemetry telemetry)
-    {
-        if (frames.Count == 0 || !IsFinite(timeSeconds) ||
-            timeSeconds < frames[0].timeSeconds || timeSeconds > frames[frames.Count - 1].timeSeconds)
-        {
-            telemetry = default;
-            return false;
-        }
-
-        telemetry = ToTelemetry(GetInterpolatedFrame(timeSeconds));
-        return true;
-    }
-
-    public bool TryGetNearestTelemetryForTimestamp(double timeSeconds, out SrtTelemetry telemetry)
-    {
-        if (!TryGetNearestFrameIndex(timeSeconds, out int index))
-        {
-            telemetry = default;
-            return false;
-        }
-
-        telemetry = ToTelemetry(frames[index]);
         return true;
     }
 
@@ -312,22 +224,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
             reason = missingFrameCounts.Contains(frameCnt)
                 ? $"SRT FrameCnt {frameCnt} is missing or malformed."
                 : $"SRT FrameCnt {frameCnt} does not exist.";
-            return false;
-        }
-
-        ConfigurePose(frames[index], false);
-        Physics.SyncTransforms();
-        reason = string.Empty;
-        return true;
-    }
-
-    public bool TryConfigureForTimestamp(double timeSeconds, out string reason)
-    {
-        if (!TryGetGeoreferencingReadiness(out reason))
-            return false;
-        if (!TryGetNearestFrameIndex(timeSeconds, out int index))
-        {
-            reason = $"Timestamp {timeSeconds.ToString("R", CultureInfo.InvariantCulture)} cannot be mapped to an SRT frame.";
             return false;
         }
 
@@ -353,10 +249,7 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
             camera != null ? camera.fieldOfView : 0f,
             camera != null ? camera.aspect : 0f,
             timeCursor,
-            playbackFrameIndex,
-            sourceFrameWidth,
-            sourceFrameHeight,
-            srtFocalLengthIs35mmEquivalent);
+            playbackFrameIndex);
     }
 
     public void RestoreProjectionState(ProjectionState state)
@@ -378,9 +271,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
 
         timeCursor = state.PlaybackTimeSeconds;
         playbackFrameIndex = state.PlaybackFrameIndex;
-        sourceFrameWidth = state.SourceFrameWidth;
-        sourceFrameHeight = state.SourceFrameHeight;
-        srtFocalLengthIs35mmEquivalent = state.SrtFocalLengthIs35mmEquivalent;
     }
 
     public bool TryRaycastMap(Ray ray, out RaycastHit hit)
@@ -450,7 +340,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     {
         BuildRayOriginAndDirection(frame, out Vector3 worldPos, out Vector3 worldDirection, out Vector3 rayOrigin);
         transform.position = worldPos;
-        UpdateDroneSpriteVisual();
         UpdateDroneViewCamera(rayOrigin, worldDirection, frame);
 
         if (!drawCentralRay || !drawDebug)
@@ -478,12 +367,8 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
             localPos.y = -localPos.y;
 
         worldPos = mapRoot != null ? mapRoot.TransformPoint(localPos) : localPos;
-        Quaternion rootRotation = mapRoot != null ? mapRoot.rotation : Quaternion.identity;
         worldDirection = BuildWorldRayDirection(frame);
-        rayOrigin = worldPos
-            + rootRotation * cameraOffsetLocal
-            + Vector3.up * rayOriginUpOffset
-            + worldDirection * rayOriginForwardOffset;
+        rayOrigin = worldPos;
     }
 
     private Vector3 BuildWorldRayDirection(SrtFrame frame)
@@ -582,8 +467,8 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
 
     private float GetCaptureAspectRatio()
     {
-        if (sourceFrameWidth > 1 && sourceFrameHeight > 1)
-            return (float)sourceFrameWidth / sourceFrameHeight;
+        if (droneViewCamera != null && IsFinite(droneViewCamera.aspect) && droneViewCamera.aspect > 0f)
+            return droneViewCamera.aspect;
         return 16f / 9f;
     }
 
@@ -612,9 +497,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     private bool PassesTargetFilter(Collider collider)
     {
         if (collider == null)
-            return false;
-        if (requireTargetTag &&
-            (string.IsNullOrWhiteSpace(targetColliderTag) || !collider.CompareTag(targetColliderTag)))
             return false;
         if (!raycastTargetOnly)
             return true;
@@ -880,38 +762,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         return Mathf.Clamp(high, 0, frames.Count - 1);
     }
 
-    private bool TryGetNearestFrameIndex(double timeSeconds, out int index)
-    {
-        index = -1;
-        if (frames.Count == 0 || !IsFinite(timeSeconds))
-            return false;
-        if (timeSeconds <= frames[0].timeSeconds)
-        {
-            index = 0;
-            return true;
-        }
-        if (timeSeconds >= frames[frames.Count - 1].timeSeconds)
-        {
-            index = frames.Count - 1;
-            return true;
-        }
-
-        int previousIndex = GetFrameIndexForTime(timeSeconds);
-        int nextIndex = Math.Min(previousIndex + 1, frames.Count - 1);
-        double previousDistance = Math.Abs(timeSeconds - frames[previousIndex].timeSeconds);
-        double nextDistance = Math.Abs(frames[nextIndex].timeSeconds - timeSeconds);
-        index = nextDistance < previousDistance ? nextIndex : previousIndex;
-        return true;
-    }
-
-    private static SrtTelemetry ToTelemetry(SrtFrame frame)
-    {
-        return new SrtTelemetry(
-            frame.frameCnt, frame.timeSeconds, frame.latitude, frame.longitude,
-            frame.relativeAltitude, frame.absoluteAltitude, frame.yaw, frame.pitch,
-            frame.roll, frame.focalLengthMm);
-    }
-
     private static double LerpDouble(double left, double right, float t)
     {
         return left + (right - left) * t;
@@ -925,42 +775,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         if (value <= -180f)
             value += 360f;
         return value;
-    }
-
-    private void EnsureDroneSprite()
-    {
-        if (droneSprite == null)
-            return;
-        droneSpriteRenderer = GetComponentInChildren<SpriteRenderer>();
-        if (droneSpriteRenderer == null)
-        {
-            var spriteObject = new GameObject("DroneSprite");
-            spriteObject.transform.SetParent(transform, false);
-            droneSpriteRenderer = spriteObject.AddComponent<SpriteRenderer>();
-        }
-        droneSpriteRenderer.sprite = droneSprite;
-        UpdateDroneSpriteVisual();
-    }
-
-    private void UpdateDroneSpriteVisual()
-    {
-        if (droneSpriteRenderer == null)
-            return;
-        droneSpriteRenderer.sprite = droneSprite;
-        droneSpriteRenderer.transform.localScale = Vector3.one * Mathf.Max(0.01f, droneSpriteScale);
-    }
-
-    private void EnsureDroneViewCamera()
-    {
-        if (droneViewCamera != null || !autoCreateDroneViewCamera)
-            return;
-        var cameraObject = new GameObject("DroneViewCamera");
-        cameraObject.transform.SetParent(transform, false);
-        createdDroneViewCamera = cameraObject.AddComponent<Camera>();
-        createdDroneViewCamera.depth = Camera.main != null ? Camera.main.depth + 1f : 1f;
-        createdDroneViewCamera.clearFlags = CameraClearFlags.Depth;
-        createdDroneViewCamera.cullingMask = ~0;
-        droneViewCamera = createdDroneViewCamera;
     }
 
     private static string ResolvePath(string rawPath, FilePathRoot rootMode)
@@ -1020,37 +834,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         public float focalLengthMm;
     }
 
-    public readonly struct SrtTelemetry
-    {
-        public int FrameCnt { get; }
-        public double TimeSeconds { get; }
-        public double Latitude { get; }
-        public double Longitude { get; }
-        public double RelativeAltitude { get; }
-        public double AbsoluteAltitude { get; }
-        public float Yaw { get; }
-        public float Pitch { get; }
-        public float Roll { get; }
-        public float FocalLengthMm { get; }
-
-        public SrtTelemetry(
-            int frameCnt, double timeSeconds, double latitude, double longitude,
-            double relativeAltitude, double absoluteAltitude, float yaw, float pitch,
-            float roll, float focalLengthMm)
-        {
-            FrameCnt = frameCnt;
-            TimeSeconds = timeSeconds;
-            Latitude = latitude;
-            Longitude = longitude;
-            RelativeAltitude = relativeAltitude;
-            AbsoluteAltitude = absoluteAltitude;
-            Yaw = yaw;
-            Pitch = pitch;
-            Roll = roll;
-            FocalLengthMm = focalLengthMm;
-        }
-    }
-
     public readonly struct ProjectionState
     {
         public Vector3 DronePosition { get; }
@@ -1066,9 +849,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         public float CameraAspect { get; }
         public double PlaybackTimeSeconds { get; }
         public int PlaybackFrameIndex { get; }
-        public int SourceFrameWidth { get; }
-        public int SourceFrameHeight { get; }
-        public bool SrtFocalLengthIs35mmEquivalent { get; }
 
         public ProjectionState(
             Vector3 dronePosition,
@@ -1083,10 +863,7 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
             float cameraFieldOfView,
             float cameraAspect,
             double playbackTimeSeconds,
-            int playbackFrameIndex,
-            int sourceFrameWidth,
-            int sourceFrameHeight,
-            bool srtFocalLengthIs35mmEquivalent)
+            int playbackFrameIndex)
         {
             DronePosition = dronePosition;
             DroneRotation = droneRotation;
@@ -1101,9 +878,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
             CameraAspect = cameraAspect;
             PlaybackTimeSeconds = playbackTimeSeconds;
             PlaybackFrameIndex = playbackFrameIndex;
-            SourceFrameWidth = sourceFrameWidth;
-            SourceFrameHeight = sourceFrameHeight;
-            SrtFocalLengthIs35mmEquivalent = srtFocalLengthIs35mmEquivalent;
         }
     }
 
@@ -1115,142 +889,4 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         DataPath
     }
 
-#if UNITY_EDITOR
-    private const string InitialConfigurationAssetPath = "Assets/Settings/DroneInitialConfiguration.asset";
-
-    [ContextMenu("Save Current Inspector As Initial Configuration")]
-    private void SaveCurrentInspectorAsInitialConfiguration()
-    {
-        if (Application.isPlaying)
-        {
-            Debug.LogWarning("[SrtDroneRaycastPlayer] Save initial configuration in Edit Mode.", this);
-            return;
-        }
-
-        DroneInitialConfiguration preset =
-            UnityEditor.AssetDatabase.LoadAssetAtPath<DroneInitialConfiguration>(InitialConfigurationAssetPath);
-        if (preset == null)
-        {
-            if (!UnityEditor.AssetDatabase.IsValidFolder("Assets/Settings"))
-                UnityEditor.AssetDatabase.CreateFolder("Assets", "Settings");
-            preset = ScriptableObject.CreateInstance<DroneInitialConfiguration>();
-            UnityEditor.AssetDatabase.CreateAsset(preset, InitialConfigurationAssetPath);
-        }
-
-        UnityEditor.Undo.RecordObject(preset, "Save Drone Initial Configuration");
-        CopyToPreset(preset);
-        UnityEditor.EditorUtility.SetDirty(preset);
-        UnityEditor.AssetDatabase.SaveAssets();
-    }
-
-    [ContextMenu("Apply initial configuration")]
-    private void ApplyInitialConfiguration()
-    {
-        if (Application.isPlaying)
-        {
-            Debug.LogWarning("[SrtDroneRaycastPlayer] Apply initial configuration in Edit Mode.", this);
-            return;
-        }
-
-        DroneInitialConfiguration preset =
-            UnityEditor.AssetDatabase.LoadAssetAtPath<DroneInitialConfiguration>(InitialConfigurationAssetPath);
-        if (preset == null)
-        {
-            Debug.LogWarning($"[SrtDroneRaycastPlayer] Missing {InitialConfigurationAssetPath}.", this);
-            return;
-        }
-
-        UnityEditor.Undo.RecordObject(this, "Apply Drone Initial Configuration");
-        CopyFromPreset(preset);
-        UnityEditor.EditorUtility.SetDirty(this);
-        if (gameObject.scene.IsValid())
-            UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(gameObject.scene);
-    }
-
-    private void CopyToPreset(DroneInitialConfiguration preset)
-    {
-        preset.srtFilePath = srtFilePath;
-        preset.transformConfigFilePath = transformConfigFilePath;
-        preset.inputPathRoot = inputPathRoot;
-        preset.useAbsAltitude = useAbsAltitude;
-        preset.playbackSpeed = playbackSpeed;
-        preset.loopPlayback = loopPlayback;
-        preset.interpolateFrames = interpolateFrames;
-        preset.flipPositionX = flipPositionX;
-        preset.flipPositionY = flipPositionY;
-        preset.flipDirectionX = flipDirectionX;
-        preset.flipDirectionY = flipDirectionY;
-        preset.raycastDistance = raycastDistance;
-        preset.raycastMask = raycastMask;
-        preset.requireTargetTag = requireTargetTag;
-        preset.targetColliderTag = targetColliderTag;
-        preset.raycastTargetOnly = raycastTargetOnly;
-        preset.cameraOffsetLocal = cameraOffsetLocal;
-        preset.rayOriginUpOffset = rayOriginUpOffset;
-        preset.rayOriginForwardOffset = rayOriginForwardOffset;
-        preset.yawOffsetDegrees = yawOffsetDegrees;
-        preset.gimbalBaseRotationEuler = gimbalBaseRotationEuler;
-        preset.flipYaw = flipYaw;
-        preset.flipPitch = flipPitch;
-        preset.flipRoll = flipRoll;
-        preset.droneSpriteScale = droneSpriteScale;
-        preset.autoCreateDroneViewCamera = autoCreateDroneViewCamera;
-        preset.estimateFovFromFocalLength = estimateFovFromFocalLength;
-        preset.sensorHeightMm = sensorHeightMm;
-        preset.fixedVerticalFovDegrees = fixedVerticalFovDegrees;
-        preset.drawDebug = drawDebug;
-        preset.mapRootObjectName = mapRoot != null ? mapRoot.name : string.Empty;
-        preset.targetColliderObjectName = targetCollider != null ? targetCollider.name : string.Empty;
-        preset.droneViewCameraObjectName = droneViewCamera != null ? droneViewCamera.name : string.Empty;
-        preset.droneSprite = droneSprite;
-    }
-
-    private void CopyFromPreset(DroneInitialConfiguration preset)
-    {
-        srtFilePath = preset.srtFilePath;
-        transformConfigFilePath = preset.transformConfigFilePath;
-        inputPathRoot = preset.inputPathRoot;
-        useAbsAltitude = preset.useAbsAltitude;
-        playbackSpeed = preset.playbackSpeed;
-        loopPlayback = preset.loopPlayback;
-        interpolateFrames = preset.interpolateFrames;
-        flipPositionX = preset.flipPositionX;
-        flipPositionY = preset.flipPositionY;
-        flipDirectionX = preset.flipDirectionX;
-        flipDirectionY = preset.flipDirectionY;
-        raycastDistance = preset.raycastDistance;
-        raycastMask = preset.raycastMask;
-        requireTargetTag = preset.requireTargetTag;
-        targetColliderTag = preset.targetColliderTag;
-        raycastTargetOnly = preset.raycastTargetOnly;
-        cameraOffsetLocal = preset.cameraOffsetLocal;
-        rayOriginUpOffset = preset.rayOriginUpOffset;
-        rayOriginForwardOffset = preset.rayOriginForwardOffset;
-        yawOffsetDegrees = preset.yawOffsetDegrees;
-        gimbalBaseRotationEuler = preset.gimbalBaseRotationEuler;
-        flipYaw = preset.flipYaw;
-        flipPitch = preset.flipPitch;
-        flipRoll = preset.flipRoll;
-        droneSpriteScale = preset.droneSpriteScale;
-        autoCreateDroneViewCamera = preset.autoCreateDroneViewCamera;
-        estimateFovFromFocalLength = preset.estimateFovFromFocalLength;
-        sensorHeightMm = preset.sensorHeightMm;
-        fixedVerticalFovDegrees = preset.fixedVerticalFovDegrees;
-        drawDebug = preset.drawDebug;
-        if (droneSprite == null)
-            droneSprite = preset.droneSprite;
-        RestoreReference(ref mapRoot, preset.mapRootObjectName);
-        RestoreReference(ref targetCollider, preset.targetColliderObjectName);
-        RestoreReference(ref droneViewCamera, preset.droneViewCameraObjectName);
-    }
-
-    private static void RestoreReference<T>(ref T reference, string objectName) where T : Component
-    {
-        if (reference != null || string.IsNullOrWhiteSpace(objectName))
-            return;
-        GameObject found = GameObject.Find(objectName);
-        if (found != null)
-            reference = found.GetComponent<T>();
-    }
-#endif
 }

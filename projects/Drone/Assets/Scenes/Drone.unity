@@ -317,22 +317,14 @@ MonoBehaviour:
   raycastMask:
     serializedVersion: 2
     m_Bits: 4294967295
-  requireTargetTag: 0
-  targetColliderTag: 
   targetCollider: {fileID: 7370755339059454846}
   raycastTargetOnly: 0
-  cameraOffsetLocal: {x: 0, y: 0, z: 0}
-  rayOriginUpOffset: 0
-  rayOriginForwardOffset: 0
   yawOffsetDegrees: 0
   gimbalBaseRotationEuler: {x: 0, y: 0, z: 0}
   flipYaw: 1
   flipPitch: 0
   flipRoll: 0
-  droneSprite: {fileID: 21300000, guid: da96f8030921dd545ae724b2d123775f, type: 3}
-  droneSpriteScale: 0.12
   droneViewCamera: {fileID: 1936490457}
-  autoCreateDroneViewCamera: 0
   estimateFovFromFocalLength: 1
   srtFocalLengthIs35mmEquivalent: 1
   sensorHeightMm: 7.66
@@ -347,17 +339,34 @@ MonoBehaviour:
   m_GameObject: {fileID: 1981751921}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: dbf93084061d0a84a8c3f4e2f19d08a7, type: 3}
+  m_Script: {fileID: 11500000, guid: 77a58c2119b14a52b1e91d34d672f808, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::GeoJsonDetectionGeoreferencer
+  m_EditorClassIdentifier: Assembly-CSharp::TopViewSplatProjector
   player: {fileID: 1981751924}
-  detectionProjectionMode: 1
-  randomSeed: 12345
-  inputGeoJsonPath: C:\Users\apost\Downloads\campus_video_detections.geojson
-  outputGeoJsonPath: Exports/campus_video_detections_wgs84.geojson
-  inputPathRoot: 3
-  outputPathRoot: 0
-  processOnStart: 1
+  gaussianSplatRenderer: {fileID: 8095100131712225814}
+  referenceFrameCount: 1
+  heightOffsetMeters: 0
+  imageRotationDegrees: 0
+  captureSceneLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  captureBackground: {r: 0, g: 0, b: 0, a: 1}
+  captureWidth: 2048
+  capturePngPath: Exports/top_view_splat.png
+  capturePathRoot: 0
+  maskPath: Exports/top_view_masks
+  maskPathRoot: 0
+  polygonClassName: building
+  foregroundThreshold: 0.5
+  useAlphaAsForeground: 0
+  invertForeground: 0
+  minimumComponentPixels: 64
+  contourSimplificationPixels: 2
+  maximumContourVertices: 1000
+  contourInsetPixels: 0.35
+  minimumSuccessfulRayFraction: 0.5
+  polygonGeoJsonPath: Exports/top_view_polygons.geojson
+  polygonOutputPathRoot: 0
 --- !u!23 &1464814104600207091
 MeshRenderer:
   m_ObjectHideFlags: 0
