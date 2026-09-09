@@ -21,6 +21,12 @@ namespace GaussianSplatting.Editor
         const string kPrefExportBake = "nesnausk.GaussianSplatting.ExportBakeTransform";
 
         SerializedProperty m_PropAsset;
+        SerializedProperty m_PropLoadAssetFromPath;
+        SerializedProperty m_PropAssetPath;
+        SerializedProperty m_PropInputPathRoot;
+        SerializedProperty m_PropUseSharedAssetPathJson;
+        SerializedProperty m_PropSharedAssetPathsJsonFile;
+        SerializedProperty m_PropAssetPathJsonKey;
         SerializedProperty m_PropRenderOrder;
         SerializedProperty m_PropSplatScale;
         SerializedProperty m_PropOpacityScale;
@@ -61,6 +67,12 @@ namespace GaussianSplatting.Editor
             m_ExportBakeTransform = EditorPrefs.GetBool(kPrefExportBake, false);
 
             m_PropAsset = serializedObject.FindProperty("m_Asset");
+            m_PropLoadAssetFromPath = serializedObject.FindProperty("m_LoadAssetFromPath");
+            m_PropAssetPath = serializedObject.FindProperty("m_AssetPath");
+            m_PropInputPathRoot = serializedObject.FindProperty("m_InputPathRoot");
+            m_PropUseSharedAssetPathJson = serializedObject.FindProperty("m_UseSharedAssetPathJson");
+            m_PropSharedAssetPathsJsonFile = serializedObject.FindProperty("m_SharedAssetPathsJsonFile");
+            m_PropAssetPathJsonKey = serializedObject.FindProperty("m_AssetPathJsonKey");
             m_PropRenderOrder = serializedObject.FindProperty("m_RenderOrder");
             m_PropSplatScale = serializedObject.FindProperty("m_SplatScale");
             m_PropOpacityScale = serializedObject.FindProperty("m_OpacityScale");
@@ -94,6 +106,44 @@ namespace GaussianSplatting.Editor
 
             GUILayout.Label("Data Asset", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(m_PropAsset);
+            EditorGUILayout.PropertyField(m_PropLoadAssetFromPath, new GUIContent("Load Asset From Path"));
+            if (m_PropLoadAssetFromPath.boolValue)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.PropertyField(m_PropUseSharedAssetPathJson, new GUIContent("Use Shared Path JSON"));
+                if (m_PropUseSharedAssetPathJson.boolValue)
+                {
+                    EditorGUILayout.PropertyField(m_PropSharedAssetPathsJsonFile, new GUIContent("Shared Config File"));
+                    EditorGUILayout.PropertyField(m_PropAssetPathJsonKey, new GUIContent("Asset Path JSON Key"));
+                    EditorGUILayout.PropertyField(m_PropInputPathRoot, new GUIContent("Input Path Root"));
+                    EditorGUILayout.HelpBox(
+                        "The shared config is read from StreamingAssets; its path value uses Input Path Root.",
+                        MessageType.None);
+                }
+                else
+                {
+                    EditorGUILayout.PropertyField(m_PropAssetPath, new GUIContent("Custom Asset Path"));
+                    EditorGUILayout.PropertyField(m_PropInputPathRoot, new GUIContent("Input Path Root"));
+                }
+                EditorGUI.indentLevel--;
+
+                if (targets.Length == 1)
+                {
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        if (GUILayout.Button("Validate Path"))
+                        {
+                            serializedObject.ApplyModifiedProperties();
+                            gs.ValidateAssetPath();
+                        }
+                        if (GUILayout.Button("Load Asset"))
+                        {
+                            serializedObject.ApplyModifiedProperties();
+                            gs.LoadAssetFromConfiguredPath();
+                        }
+                    }
+                }
+            }
 
             if (!gs.HasValidAsset)
             {

@@ -1,6 +1,30 @@
 using System;
 using UnityEngine;
 
+/// <summary>Minimal transform JSON schema required by the SRT/top-view pipeline.</summary>
+[Serializable]
+public sealed class TransformConfig
+{
+    public OriginWgs84 origin_wgs84;
+    public ColmapToEnu colmap_to_enu;
+}
+
+[Serializable]
+public sealed class OriginWgs84
+{
+    public double lat;
+    public double lon;
+    public double alt;
+}
+
+[Serializable]
+public sealed class ColmapToEnu
+{
+    public float scale;
+    public float[] R_rowmajor;
+    public float[] t;
+}
+
 public static class GeoUtils
 {
     public static Vector3 GetColmapPosition(double lon, double lat, double alt, TransformConfig transformData)

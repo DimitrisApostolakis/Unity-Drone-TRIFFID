@@ -301,9 +301,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8349b55471c94e84387359473d1f0987, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SrtDroneRaycastPlayer
-  srtFilePath: Harokopio/harokopio.srt
-  transformConfigFilePath: Harokopio/harokopio.json
-  inputPathRoot: 1
+  srtFilePath: Assets/StreamingAssets/Harokopio/harokopio.srt
+  transformConfigFilePath: Assets/StreamingAssets/Harokopio/harokopio.json
+  inputPathRoot: 0
+  useSharedInputPathsJson: 0
+  sharedInputPathsJsonFile: project_paths.json
+  srtPathJsonKey: srt_path
+  transformPathJsonKey: transform_json_path
   mapRoot: {fileID: 5763572441364102360}
   useAbsAltitude: 1
   playbackSpeed: 1
@@ -317,22 +321,15 @@ MonoBehaviour:
   raycastMask:
     serializedVersion: 2
     m_Bits: 4294967295
-  requireTargetTag: 0
-  targetColliderTag: 
   targetCollider: {fileID: 7370755339059454846}
   raycastTargetOnly: 0
-  cameraOffsetLocal: {x: 0, y: 0, z: 0}
-  rayOriginUpOffset: 0
-  rayOriginForwardOffset: 0
   yawOffsetDegrees: 0
   gimbalBaseRotationEuler: {x: 0, y: 0, z: 0}
   flipYaw: 1
   flipPitch: 0
   flipRoll: 0
-  droneSprite: {fileID: 21300000, guid: da96f8030921dd545ae724b2d123775f, type: 3}
-  droneSpriteScale: 0.12
   droneViewCamera: {fileID: 1936490457}
-  autoCreateDroneViewCamera: 0
+  showInGameView: 1
   estimateFovFromFocalLength: 1
   srtFocalLengthIs35mmEquivalent: 1
   sensorHeightMm: 7.66
@@ -347,17 +344,34 @@ MonoBehaviour:
   m_GameObject: {fileID: 1981751921}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: dbf93084061d0a84a8c3f4e2f19d08a7, type: 3}
+  m_Script: {fileID: 11500000, guid: 77a58c2119b14a52b1e91d34d672f808, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::GeoJsonDetectionGeoreferencer
+  m_EditorClassIdentifier: Assembly-CSharp::TopViewSplatProjector
   player: {fileID: 1981751924}
-  detectionProjectionMode: 1
-  randomSeed: 12345
-  inputGeoJsonPath: C:\Users\apost\Downloads\campus_video_detections.geojson
-  outputGeoJsonPath: Exports/campus_video_detections_wgs84.geojson
-  inputPathRoot: 3
-  outputPathRoot: 0
-  processOnStart: 1
+  gaussianSplatRenderer: {fileID: 8095100131712225814}
+  referenceFrameCount: 1
+  heightOffsetMeters: 200
+  imageRotationDegrees: 0
+  captureSceneLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  captureBackground: {r: 0, g: 0, b: 0, a: 1}
+  captureWidth: 2048
+  capturePngPath: Exports/top_view_splat.png
+  capturePathRoot: 0
+  maskPath: Exports/top_view_masks
+  maskPathRoot: 0
+  polygonClassName: building
+  foregroundThreshold: 0.5
+  useAlphaAsForeground: 0
+  invertForeground: 0
+  minimumComponentPixels: 64
+  contourSimplificationPixels: 2
+  maximumContourVertices: 1000
+  contourInsetPixels: 0.35
+  minimumSuccessfulRayFraction: 0.5
+  polygonGeoJsonPath: Exports/top_view_polygons.geojson
+  polygonOutputPathRoot: 0
 --- !u!23 &1464814104600207091
 MeshRenderer:
   m_ObjectHideFlags: 0
@@ -432,20 +446,6 @@ MeshFilter:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 7690009995637296120}
   m_Mesh: {fileID: -2432090755550338912, guid: 3a7f2b1c63300c74998bf95314503526, type: 3}
---- !u!114 &3953790660718704620
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 8265716569373026495}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 2c57a1c501bd05549ae157cc474bd4c4, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: GaussianSplatting::GaussianSplatting.Runtime.GaussianCutout
-  m_Type: 1
-  m_Invert: 0
 --- !u!1 &5130374145050861681
 GameObject:
   m_ObjectHideFlags: 0
@@ -455,6 +455,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 7423223985153383410}
+  - component: {fileID: 7423223985153383411}
   m_Layer: 0
   m_Name: Map Origin
   m_TagString: Untagged
@@ -470,13 +471,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 7690009995637296120}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.87881714, y: 0, z: 0, w: 0.4771588}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 4}
   m_LocalScale: {x: 0.3, y: 0.3, z: 0.3}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 123, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!114 &6899962630616225025
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -490,8 +491,12 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::MapColliderSync
   MapTransform: {fileID: 7423223985153383410}
+  GaussianRenderer: {fileID: 8355386886639151933}
   MeshColliderObject: {fileID: 5763572441364102360}
-  rotationOffsetEuler: {x: 123, y: 0, z: 0}
+  rotationOffsetEuler: {x: 0, y: 0, z: 0}
+  copyPositionFromMapRoot: 1
+  copyScaleFromMapRoot: 1
+  useGaussianWorldRotation: 1
 --- !u!64 &7370755339059454846
 MeshCollider:
   m_ObjectHideFlags: 0
@@ -528,9 +533,43 @@ Transform:
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 8355386886639151933}
-  - {fileID: 7838575523350542168}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &7423223985153383411
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5130374145050861681}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b106e75bd2a17e64599a561032f4db88, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::ColmapGaussianRotationAligner
+  gaussianRenderer: {fileID: 8355386886639151933}
+  mapColliderSync: {fileID: 6899962630616225025}
+  transformJsonPath: Assets/StreamingAssets/Harokopio/harokopio.json
+  inputPathRoot: 0
+  useSharedTransformPathJson: 0
+  sharedTransformPathsJsonFile: project_paths.json
+  transformPathJsonKey: colmap_aligner_transform_path
+  applyOnStart: 1
+  applyOnEnable: 1
+  applyAfterOneFrame: 1
+  rememberInitialRotation: 1
+  syncColliderAfterApply: 1
+  syncColliderAgainAfterOneFrame: 1
+  enuToUnityAxisMode: 0
+  customEastAxis: {x: 1, y: 0, z: 0}
+  customNorthAxis: {x: 0, y: 0, z: 1}
+  customUpAxis: {x: 0, y: 1, z: 0}
+  transposeRotationMatrix: 0
+  invertRotation: 0
+  flipX: 0
+  flipY: 0
+  flipZ: 1
+  logDetails: 1
 --- !u!1 &7690009995637296120
 GameObject:
   m_ObjectHideFlags: 0
@@ -540,6 +579,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 5763572441364102360}
+  - component: {fileID: 7690009995637296121}
   - component: {fileID: 6899962630616225025}
   - component: {fileID: 7370755339059454846}
   - component: {fileID: 3426378566622261236}
@@ -551,21 +591,38 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!4 &7838575523350542168
-Transform:
+--- !u!114 &7690009995637296121
+MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 8265716569373026495}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 7, y: 7, z: 7}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 7423223985153383410}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_GameObject: {fileID: 7690009995637296120}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b7dbdc214d825ea4cb3b57cbdabed094, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::MeshPathJsonLoader
+  meshPath: Assets/Scenes/Harokopio/harokopio.obj
+  inputPathRoot: 0
+  useSharedMeshPathJson: 0
+  sharedMeshPathsJsonFile: project_paths.json
+  meshPathJsonKey: mesh_path
+  targetObject: {fileID: 7690009995637296120}
+  ensureMeshFilter: 1
+  ensureMeshRenderer: 1
+  ensureMeshCollider: 1
+  rendererMaterial: {fileID: 0}
+  convexCollider: 0
+  clearColliderBeforeAssign: 1
+  meshLoadMode: 0
+  loadOnStart: 1
+  loadOnEnable: 0
+  requireFileExists: 1
+  logDetails: 1
+  lastResolvedJsonPath: 
+  lastResolvedMeshPath: 
+  lastStatus: 
 --- !u!114 &8095100131712225814
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -578,7 +635,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c12d929a7f62c48adbe9ff45c9a33ff0, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  m_Asset: {fileID: 11400000, guid: 9ab3dca079ca6314b8b4c28ecd08145e, type: 2}
+  m_Asset: {fileID: 0}
+  m_LoadAssetFromPath: 1
+  m_AssetPath: Assets/Scenes/Harokopio/harokopio.asset
+  m_InputPathRoot: 0
+  m_UseSharedAssetPathJson: 0
+  m_SharedAssetPathsJsonFile: project_paths.json
+  m_AssetPathJsonKey: gaussian_splat_asset_path
   m_RenderOrder: 0
   m_SplatScale: 1
   m_OpacityScale: 1
@@ -586,31 +649,14 @@ MonoBehaviour:
   m_SHOnly: 0
   m_SortNthFrame: 1
   m_RenderMode: 0
-  m_PointDisplaySize: 3
+  m_PointDisplaySize: 1.11
   m_Cutouts:
-  - {fileID: 3953790660718704620}
+  - {fileID: 0}
   m_ShaderSplats: {fileID: 4800000, guid: ed800126ae8844a67aad1974ddddd59c, type: 3}
   m_ShaderComposite: {fileID: 4800000, guid: 7e184af7d01193a408eb916d8acafff9, type: 3}
   m_ShaderDebugPoints: {fileID: 4800000, guid: b44409fc67214394f8f47e4e2648425e, type: 3}
   m_ShaderDebugBoxes: {fileID: 4800000, guid: 4006f2680fd7c8b4cbcb881454c782be, type: 3}
   m_CSSplatUtilities: {fileID: 7200000, guid: ec84f78b836bd4f96a105d6b804f08bd, type: 3}
---- !u!1 &8265716569373026495
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 7838575523350542168}
-  - component: {fileID: 3953790660718704620}
-  m_Layer: 0
-  m_Name: Gaussian Cutout
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 0
 --- !u!4 &8355386886639151933
 Transform:
   m_ObjectHideFlags: 0
@@ -619,13 +665,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1834269670217190775}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.87881714, y: 0, z: 0, w: 0.4771588}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: -1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 7423223985153383410}
-  m_LocalEulerAnglesHint: {x: 123, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
