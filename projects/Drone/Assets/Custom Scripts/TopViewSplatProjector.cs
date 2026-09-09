@@ -66,6 +66,54 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         SrtDroneRaycastPlayer.FilePathRoot.ProjectRoot;
 
     [NonSerialized] private Camera gameViewPreviewCamera;
+    [NonSerialized] private bool hasHeightInfo;
+    [NonSerialized] private int heightInfoFrameCount;
+    [NonSerialized] private float referenceHeightInfoMeters;
+
+    public bool HasCurrentHeightInfo =>
+        hasHeightInfo && heightInfoFrameCount == referenceFrameCount;
+    public float ReferenceHeightInfoMeters => referenceHeightInfoMeters;
+    public float ConfiguredHeightOffsetMeters => heightOffsetMeters;
+    public float FinalHeightInfoMeters => referenceHeightInfoMeters + heightOffsetMeters;
+
+    /// <summary>
+    /// Recalculates the SRT camera height above the selected centre hit without capturing an
+    /// image or leaving a temporary camera in the scene.
+    /// </summary>
+    public bool TryRefreshHeightInfo(out string error)
+    {
+        error = string.Empty;
+        if (player == null)
+            return Fail("SrtDroneRaycastPlayer reference is missing.", out error);
+
+        SrtDroneRaycastPlayer.ProjectionState savedState = player.CaptureProjectionState();
+        Camera temporaryCamera = null;
+#if UNITY_EDITOR
+        SceneDirtinessState dirtiness = SceneDirtinessState.Capture(player, player.DroneViewCamera);
+#endif
+        try
+        {
+            if (!player.TryPrepareForGeoreferencing(out string preparationError))
+                return Fail($"Preparation failed: {preparationError}", out error);
+            if (!TryCreateTopViewCamera(
+                    out temporaryCamera, out TopViewContext _, out string cameraError))
+                return Fail($"Top-view setup failed: {cameraError}", out error);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            return Fail($"Height calculation failed: {exception.Message}", out error);
+        }
+        finally
+        {
+            DestroyTemporaryCamera(temporaryCamera);
+            player.RestoreProjectionState(savedState);
+            Physics.SyncTransforms();
+#if UNITY_EDITOR
+            dirtiness.Restore();
+#endif
+        }
+    }
 
     [ContextMenu("0. Show Or Refresh Game View Preview")]
     public void ShowOrRefreshGameViewPreview()
@@ -352,6 +400,9 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             worldEast,
             worldNorth,
             worldUp);
+        hasHeightInfo = true;
+        heightInfoFrameCount = referenceFrameCount;
+        referenceHeightInfoMeters = referenceHeightMeters;
         return true;
     }
 

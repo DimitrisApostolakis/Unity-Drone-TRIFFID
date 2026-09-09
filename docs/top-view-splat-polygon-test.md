@@ -38,6 +38,12 @@ The top-view camera always uses the lens, sensor/FOV and perspective projection 
 the selected SRT frame. Orthographic and fixed-Unity-height modes are intentionally not part of
 this pipeline.
 
+The Inspector's **Calculated Height** section shows the SRT camera height above the centre-ray
+surface hit, the configured offset, and their final sum. Press **Refresh Height Info** after
+changing the SRT, transform JSON, reference frame, map alignment, or collider. Once the reference
+height has been calculated, changing only **Height Offset Meters** updates the displayed final
+height immediately.
+
 ## Capture and preview
 
 Use the component context menu in this order:
