@@ -2,19 +2,12 @@ using System;
 using System.Collections;
 using System.Globalization;
 using System.IO;
+using GaussianSplatting.Runtime;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
 public class ColmapGaussianRotationAligner : MonoBehaviour
 {
-    public enum FilePathRoot
-    {
-        ProjectRoot,
-        StreamingAssets,
-        PersistentDataPath,
-        DataPath
-    }
-
     public enum EnuToUnityAxisMode
     {
         XEast_YUp_ZNorth,
@@ -27,11 +20,9 @@ public class ColmapGaussianRotationAligner : MonoBehaviour
 
     public MapColliderSync mapColliderSync;
 
-    [Header("Transform JSON")]
+    [Header("Transform Path Loading")]
     public string transformJsonPath = "colmap_to_unity_transform.json";
-    public FilePathRoot inputPathRoot = FilePathRoot.StreamingAssets;
-
-    [Header("Shared Transform Path Config")]
+    public ProjectPathResolver.PathRoot inputPathRoot = ProjectPathResolver.PathRoot.StreamingAssets;
     public bool useSharedTransformPathJson = true;
     public string sharedTransformPathsJsonFile = "project_paths.json";
     public string transformPathJsonKey = "colmap_aligner_transform_path";
@@ -519,73 +510,19 @@ public class ColmapGaussianRotationAligner : MonoBehaviour
 
     private bool TryResolveTransformJsonPath(out string resolvedPath)
     {
-        resolvedPath = null;
-
-        if (useSharedTransformPathJson)
-        {
-            if (!StreamingAssetsPathResolver.TryResolvePathFromStreamingAssetsJson(
-                    sharedTransformPathsJsonFile,
-                    transformPathJsonKey,
-                    out resolvedPath,
-                    out string error))
-            {
-                Debug.LogError("[ColmapGaussianRotationAligner] Failed to resolve shared transform path: " + error, this);
-                return false;
-            }
-
+        if (ProjectPathResolver.TryResolveConfiguredPath(
+                transformJsonPath,
+                inputPathRoot,
+                useSharedTransformPathJson,
+                sharedTransformPathsJsonFile,
+                transformPathJsonKey,
+                out resolvedPath,
+                out string error))
             return true;
-        }
 
-        return TryResolveInputPath(transformJsonPath, inputPathRoot, out resolvedPath);
-    }
-
-    private bool TryResolveInputPath(string rawPath, FilePathRoot root, out string resolvedPath)
-    {
-        resolvedPath = null;
-
-        if (string.IsNullOrWhiteSpace(rawPath))
-        {
-            Debug.LogError("[ColmapGaussianRotationAligner] Transform JSON path is empty.", this);
-            return false;
-        }
-
-        try
-        {
-            if (Path.IsPathRooted(rawPath))
-            {
-                resolvedPath = Path.GetFullPath(rawPath);
-                return true;
-            }
-
-            string baseDir = GetBaseDirectory(root);
-            resolvedPath = Path.GetFullPath(Path.Combine(baseDir, rawPath));
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError($"[ColmapGaussianRotationAligner] Failed to resolve path: {rawPath}\n{ex.Message}", this);
-            return false;
-        }
-    }
-
-    private string GetBaseDirectory(FilePathRoot root)
-    {
-        switch (root)
-        {
-            case FilePathRoot.ProjectRoot:
-                DirectoryInfo parent = Directory.GetParent(Application.dataPath);
-                return parent != null ? parent.FullName : Application.dataPath;
-
-            case FilePathRoot.StreamingAssets:
-                return Application.streamingAssetsPath;
-
-            case FilePathRoot.PersistentDataPath:
-                return Application.persistentDataPath;
-
-            case FilePathRoot.DataPath:
-            default:
-                return Application.dataPath;
-        }
+        Debug.LogError(
+            "[ColmapGaussianRotationAligner] Failed to resolve transform path: " + error, this);
+        return false;
     }
 
     private static Matrix4x4 Transpose3x3(Matrix4x4 m)

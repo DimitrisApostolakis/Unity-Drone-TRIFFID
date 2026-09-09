@@ -115,6 +115,10 @@ namespace GaussianSplatting.Editor
                 {
                     EditorGUILayout.PropertyField(m_PropSharedAssetPathsJsonFile, new GUIContent("Shared Config File"));
                     EditorGUILayout.PropertyField(m_PropAssetPathJsonKey, new GUIContent("Asset Path JSON Key"));
+                    EditorGUILayout.PropertyField(m_PropInputPathRoot, new GUIContent("Input Path Root"));
+                    EditorGUILayout.HelpBox(
+                        "The shared config is read from StreamingAssets; its path value uses Input Path Root.",
+                        MessageType.None);
                 }
                 else
                 {

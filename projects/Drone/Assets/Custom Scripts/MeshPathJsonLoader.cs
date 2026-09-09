@@ -2,20 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
+using GaussianSplatting.Runtime;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Serialization;
 
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
-
-public enum PathSource
-{
-    JsonFile,
-    ManualOverride
-}
 
 public enum MeshLoadMode
 {
@@ -26,15 +20,15 @@ public enum MeshLoadMode
 
 public class MeshPathJsonLoader : MonoBehaviour
 {
-    [Header("Path Source")]
-    [SerializeField] private PathSource pathSource = PathSource.JsonFile;
-
-    [Header("JSON Config")]
-    [SerializeField] private string jsonConfigPath = "project_paths.json";
+    [Header("Mesh Path Loading")]
+    [FormerlySerializedAs("manualMeshPath")]
+    [SerializeField] private string meshPath = "Assets/Scenes/Harokopio/harokopio.obj";
+    [SerializeField] private ProjectPathResolver.PathRoot inputPathRoot =
+        ProjectPathResolver.PathRoot.ProjectRoot;
+    [SerializeField] private bool useSharedMeshPathJson;
+    [FormerlySerializedAs("jsonConfigPath")]
+    [SerializeField] private string sharedMeshPathsJsonFile = "project_paths.json";
     [SerializeField] private string meshPathJsonKey = "mesh_path";
-
-    [Header("Manual Override")]
-    [SerializeField] private string manualMeshPath = @"\\10.100.55.11\unity\building_mesh.obj";
 
     [Header("Target Components")]
     [SerializeField] private GameObject targetObject;
@@ -54,7 +48,6 @@ public class MeshPathJsonLoader : MonoBehaviour
     [SerializeField] private bool loadOnStart = false;
     [SerializeField] private bool loadOnEnable = false;
     [SerializeField] private bool requireFileExists = true;
-    [SerializeField] private bool preserveBackslashes = true;
 
     [Header("Debug")]
     [SerializeField] private bool logDetails = true;
@@ -144,76 +137,26 @@ public class MeshPathJsonLoader : MonoBehaviour
         lastResolvedJsonPath = string.Empty;
         lastResolvedMeshPath = string.Empty;
 
-        if (pathSource == PathSource.ManualOverride)
+        if (!ProjectPathResolver.TryResolveConfiguredPath(
+                this.meshPath,
+                inputPathRoot,
+                useSharedMeshPathJson,
+                sharedMeshPathsJsonFile,
+                meshPathJsonKey,
+                out meshPath,
+                out string error))
+            return Fail("Could not resolve mesh path: " + error);
+
+        if (useSharedMeshPathJson)
         {
-            if (string.IsNullOrWhiteSpace(manualMeshPath))
-                return Fail("The manual mesh path is missing or empty.");
-
-            meshPath = NormalizeMeshPath(manualMeshPath.Trim());
-            lastResolvedMeshPath = meshPath;
-            return true;
+            ProjectPathResolver.TryResolvePath(
+                sharedMeshPathsJsonFile,
+                ProjectPathResolver.PathRoot.StreamingAssets,
+                out lastResolvedJsonPath,
+                out _);
         }
-
-        if (string.IsNullOrWhiteSpace(jsonConfigPath))
-            return Fail("The JSON config path is missing or empty.");
-
-        try
-        {
-            lastResolvedJsonPath = Path.Combine(Application.streamingAssetsPath, jsonConfigPath);
-        }
-        catch (Exception exception)
-        {
-            return Fail("The JSON config path is invalid: " + exception.Message);
-        }
-
-        if (!File.Exists(lastResolvedJsonPath))
-            return Fail("JSON file not found: " + lastResolvedJsonPath);
-
-        JObject root;
-        try
-        {
-            root = JObject.Parse(File.ReadAllText(lastResolvedJsonPath));
-        }
-        catch (JsonException exception)
-        {
-            return Fail("Invalid JSON in config file '" + lastResolvedJsonPath + "': " + exception.Message);
-        }
-        catch (Exception exception)
-        {
-            return Fail("Could not read JSON config file '" + lastResolvedJsonPath + "': " + exception.Message);
-        }
-
-        if (string.IsNullOrWhiteSpace(meshPathJsonKey))
-            return Fail("The configured mesh path JSON key is missing or empty.");
-
-        JToken meshPathToken;
-        try
-        {
-            meshPathToken = root.SelectToken(meshPathJsonKey, false);
-        }
-        catch (JsonException exception)
-        {
-            return Fail("The configured JSON key expression is invalid: " + exception.Message);
-        }
-
-        if (meshPathToken == null)
-            return Fail("Configured key '" + meshPathJsonKey + "' is missing from JSON config: " + lastResolvedJsonPath);
-
-        if (meshPathToken.Type != JTokenType.String)
-            return Fail("Configured key '" + meshPathJsonKey + "' must contain a mesh path string.");
-
-        string configuredMeshPath = meshPathToken.Value<string>();
-        if (string.IsNullOrWhiteSpace(configuredMeshPath))
-            return Fail("Configured key '" + meshPathJsonKey + "' is empty in JSON config: " + lastResolvedJsonPath);
-
-        meshPath = NormalizeMeshPath(configuredMeshPath.Trim());
         lastResolvedMeshPath = meshPath;
         return true;
-    }
-
-    private string NormalizeMeshPath(string path)
-    {
-        return preserveBackslashes ? path : path.Replace('\\', '/');
     }
 
     private bool ValidateTarget()
@@ -234,8 +177,10 @@ public class MeshPathJsonLoader : MonoBehaviour
         if (useAssetDatabase)
         {
 #if UNITY_EDITOR
-            if (requireFileExists && AssetDatabase.LoadMainAssetAtPath(meshPath) == null)
-                return Fail("Mesh asset not found at Unity asset path: " + meshPath);
+            if (!ProjectPathResolver.TryGetUnityProjectRelativePath(meshPath, out string assetPath))
+                return Fail("Mesh path is not inside this Unity project's Assets or Packages folder: " + meshPath);
+            if (requireFileExists && AssetDatabase.LoadMainAssetAtPath(assetPath) == null)
+                return Fail("Mesh asset not found at Unity asset path: " + assetPath);
 
             return true;
 #else
@@ -273,12 +218,12 @@ public class MeshPathJsonLoader : MonoBehaviour
         switch (meshLoadMode)
         {
             case MeshLoadMode.Auto:
-                useAssetDatabase = meshPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase);
+                useAssetDatabase = ProjectPathResolver.TryGetUnityProjectRelativePath(meshPath, out _);
                 return true;
 
             case MeshLoadMode.UnityEditorAssetPath:
-                if (!meshPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
-                    return Fail("Unity Editor asset paths must start with 'Assets/'. Path: " + meshPath);
+                if (!ProjectPathResolver.TryGetUnityProjectRelativePath(meshPath, out _))
+                    return Fail("Unity Editor mesh paths must resolve inside Assets or Packages. Path: " + meshPath);
 
                 useAssetDatabase = true;
                 return true;
@@ -304,7 +249,11 @@ public class MeshPathJsonLoader : MonoBehaviour
             return false;
 
         if (useAssetDatabase)
-            return TryLoadUnityEditorMesh(meshPath, out mesh);
+        {
+            if (!ProjectPathResolver.TryGetUnityProjectRelativePath(meshPath, out string assetPath))
+                return Fail("Mesh path is not inside this Unity project: " + meshPath);
+            return TryLoadUnityEditorMesh(assetPath, out mesh);
+        }
 
         return TryLoadExternalObj(meshPath, out mesh);
     }

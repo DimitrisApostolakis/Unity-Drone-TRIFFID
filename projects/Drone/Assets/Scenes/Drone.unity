@@ -304,6 +304,10 @@ MonoBehaviour:
   srtFilePath: Assets/StreamingAssets/Harokopio/harokopio.srt
   transformConfigFilePath: Assets/StreamingAssets/Harokopio/harokopio.json
   inputPathRoot: 0
+  useSharedInputPathsJson: 0
+  sharedInputPathsJsonFile: project_paths.json
+  srtPathJsonKey: srt_path
+  transformPathJsonKey: transform_json_path
   mapRoot: {fileID: 5763572441364102360}
   useAbsAltitude: 1
   playbackSpeed: 1
@@ -325,6 +329,7 @@ MonoBehaviour:
   flipPitch: 0
   flipRoll: 0
   droneViewCamera: {fileID: 1936490457}
+  showInGameView: 1
   estimateFovFromFocalLength: 1
   srtFocalLengthIs35mmEquivalent: 1
   sensorHeightMm: 7.66
@@ -598,10 +603,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b7dbdc214d825ea4cb3b57cbdabed094, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::MeshPathJsonLoader
-  pathSource: 1
-  jsonConfigPath: project_paths.json
+  meshPath: Assets/Scenes/Harokopio/harokopio.obj
+  inputPathRoot: 0
+  useSharedMeshPathJson: 0
+  sharedMeshPathsJsonFile: project_paths.json
   meshPathJsonKey: mesh_path
-  manualMeshPath: Assets/Scenes/Harokopio/harokopio.obj
   targetObject: {fileID: 7690009995637296120}
   ensureMeshFilter: 1
   ensureMeshRenderer: 1
@@ -609,11 +615,10 @@ MonoBehaviour:
   rendererMaterial: {fileID: 0}
   convexCollider: 0
   clearColliderBeforeAssign: 1
-  meshLoadMode: 2
+  meshLoadMode: 0
   loadOnStart: 1
-  loadOnEnable: 1
+  loadOnEnable: 0
   requireFileExists: 1
-  preserveBackslashes: 1
   logDetails: 1
   lastResolvedJsonPath: 
   lastResolvedMeshPath: 

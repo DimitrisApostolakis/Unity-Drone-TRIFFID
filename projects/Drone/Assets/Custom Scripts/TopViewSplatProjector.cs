@@ -37,14 +37,14 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     [Header("3. Top-view capture")]
     [Min(64)] [SerializeField] private int captureWidth = 2048;
     [SerializeField] private string capturePngPath = "Exports/top_view_splat.png";
-    [SerializeField] private SrtDroneRaycastPlayer.FilePathRoot capturePathRoot =
-        SrtDroneRaycastPlayer.FilePathRoot.ProjectRoot;
+    [SerializeField] private ProjectPathResolver.PathRoot capturePathRoot =
+        ProjectPathResolver.PathRoot.ProjectRoot;
 
     [Header("4. Few-shot masks")]
     [Tooltip("A mask PNG/JPG or a directory containing masks produced from the captured top view. Absolute Windows paths are accepted.")]
     [SerializeField] private string maskPath = "Exports/top_view_masks";
-    [SerializeField] private SrtDroneRaycastPlayer.FilePathRoot maskPathRoot =
-        SrtDroneRaycastPlayer.FilePathRoot.ProjectRoot;
+    [SerializeField] private ProjectPathResolver.PathRoot maskPathRoot =
+        ProjectPathResolver.PathRoot.ProjectRoot;
     [SerializeField] private string polygonClassName = "building";
     [Range(0f, 1f)] [SerializeField] private float foregroundThreshold = 0.5f;
     [SerializeField] private bool useAlphaAsForeground;
@@ -62,8 +62,8 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     [Range(0.05f, 1f)]
     [SerializeField] private float minimumSuccessfulRayFraction = 0.5f;
     [SerializeField] private string polygonGeoJsonPath = "Exports/top_view_polygons.geojson";
-    [SerializeField] private SrtDroneRaycastPlayer.FilePathRoot polygonOutputPathRoot =
-        SrtDroneRaycastPlayer.FilePathRoot.ProjectRoot;
+    [SerializeField] private ProjectPathResolver.PathRoot polygonOutputPathRoot =
+        ProjectPathResolver.PathRoot.ProjectRoot;
 
     [NonSerialized] private Camera gameViewPreviewCamera;
     [NonSerialized] private bool hasHeightInfo;
@@ -75,6 +75,21 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     public float ReferenceHeightInfoMeters => referenceHeightInfoMeters;
     public float ConfiguredHeightOffsetMeters => heightOffsetMeters;
     public float FinalHeightInfoMeters => referenceHeightInfoMeters + heightOffsetMeters;
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    private static void RemoveEditorPreviewBeforePlayMode()
+    {
+        Camera[] cameras = Resources.FindObjectsOfTypeAll<Camera>();
+        for (int i = 0; i < cameras.Length; i++)
+        {
+            Camera camera = cameras[i];
+            if (camera != null && camera.gameObject.name == "TopViewGamePreviewCamera")
+            {
+                camera.enabled = false;
+                Destroy(camera.gameObject);
+            }
+        }
+    }
 
     /// <summary>
     /// Recalculates the SRT camera height above the selected centre hit without capturing an
@@ -1183,15 +1198,12 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     }
 
     private static string ResolvePath(
-        string rawPath, SrtDroneRaycastPlayer.FilePathRoot rootMode)
+        string rawPath, ProjectPathResolver.PathRoot rootMode)
     {
-        if (string.IsNullOrWhiteSpace(rawPath))
-            return string.Empty;
-        if (Path.IsPathRooted(rawPath))
-            return Path.GetFullPath(rawPath);
-        return Path.GetFullPath(Path.Combine(
-            SrtDroneRaycastPlayer.GetPathRoot(rootMode),
-            rawPath.Replace('/', Path.DirectorySeparatorChar)));
+        return ProjectPathResolver.TryResolvePath(
+            rawPath, rootMode, out string resolvedPath, out _)
+            ? resolvedPath
+            : string.Empty;
     }
 
     private static bool TryWriteBytesAtomically(string path, byte[] bytes, out string error)

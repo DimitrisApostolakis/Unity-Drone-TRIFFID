@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
+using GaussianSplatting.Runtime;
 using Newtonsoft.Json;
 using UnityEngine;
 
@@ -12,48 +13,57 @@ using UnityEngine;
 /// </summary>
 public sealed class SrtDroneRaycastPlayer : MonoBehaviour
 {
-    [Header("1. Inputs")]
+    [Header("1. Input Path Loading")]
     [Tooltip("SRT file path. Relative paths use Input Path Root.")]
     [SerializeField] private string srtFilePath = string.Empty;
     [Tooltip("Transform config JSON path. Relative paths use Input Path Root.")]
     [SerializeField] private string transformConfigFilePath = string.Empty;
-    [SerializeField] private FilePathRoot inputPathRoot = FilePathRoot.StreamingAssets;
+    [SerializeField] private ProjectPathResolver.PathRoot inputPathRoot =
+        ProjectPathResolver.PathRoot.StreamingAssets;
+    [SerializeField] private bool useSharedInputPathsJson;
+    [SerializeField] private string sharedInputPathsJsonFile = "project_paths.json";
+    [SerializeField] private string srtPathJsonKey = "srt_path";
+    [SerializeField] private string transformPathJsonKey = "transform_json_path";
+
+    [Header("2. Scene Reference")]
     [Tooltip("Root transform for the reconstructed COLMAP map or terrain.")]
     [SerializeField] private Transform mapRoot;
 
-    [Header("2. Playback")]
+    [Header("3. Playback")]
     [SerializeField] private bool useAbsAltitude = true;
     [SerializeField] private float playbackSpeed = 1f;
     [SerializeField] private bool loopPlayback = true;
     [SerializeField] private bool interpolateFrames = true;
 
-    [Header("3. Alignment Corrections")]
+    [Header("4. Alignment Corrections")]
     [SerializeField] private bool flipPositionX;
     [SerializeField] private bool flipPositionY;
     [SerializeField] private bool flipDirectionX = true;
     [SerializeField] private bool flipDirectionY;
 
-    [Header("4. Raycast Target")]
+    [Header("5. Raycast Target")]
     [SerializeField] private float raycastDistance = 5000f;
     [SerializeField] private LayerMask raycastMask = ~0;
     [SerializeField] private Collider targetCollider;
     [SerializeField] private bool raycastTargetOnly;
 
-    [Header("5. DJI Gimbal")]
+    [Header("6. DJI Gimbal")]
     [SerializeField] private float yawOffsetDegrees;
     [SerializeField] private Vector3 gimbalBaseRotationEuler = Vector3.zero;
     [SerializeField] private bool flipYaw = true;
     [SerializeField] private bool flipPitch = true;
     [SerializeField] private bool flipRoll;
 
-    [Header("6. Drone View Camera")]
+    [Header("7. Drone View Camera")]
     [SerializeField] private Camera droneViewCamera;
+    [Tooltip("Make Drone View Camera the full-screen Display 1 camera when Play Mode starts.")]
+    [SerializeField] private bool showInGameView = true;
     [SerializeField] private bool estimateFovFromFocalLength = true;
     [SerializeField] private bool srtFocalLengthIs35mmEquivalent = true;
     [SerializeField] private float sensorHeightMm = 7.66f;
     [SerializeField] private float fixedVerticalFovDegrees = 60f;
 
-    [Header("7. Debug")]
+    [Header("8. Debug")]
     [SerializeField] private bool drawDebug = true;
 
     private readonly List<SrtFrame> frames = new List<SrtFrame>();
@@ -95,7 +105,25 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
 
     private void Awake()
     {
+        ConfigureGameViewCamera();
         ReloadInputs();
+    }
+
+    private void OnEnable()
+    {
+        if (Application.isPlaying)
+            ConfigureGameViewCamera();
+    }
+
+    private void ConfigureGameViewCamera()
+    {
+        if (!showInGameView || droneViewCamera == null)
+            return;
+
+        droneViewCamera.targetTexture = null;
+        droneViewCamera.targetDisplay = 0;
+        droneViewCamera.rect = new Rect(0f, 0f, 1f, 1f);
+        droneViewCamera.enabled = true;
     }
 
     private void Update()
@@ -130,7 +158,7 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     }
 
     [ContextMenu("Reload SRT And Transform")]
-    private void ReloadInputs()
+    public void ReloadInputs()
     {
         ParseSrt();
         LoadTransformConfig();
@@ -155,8 +183,9 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     }
 
     [ContextMenu("Validate Setup")]
-    private void ValidateSetup()
+    public void ValidateSetup()
     {
+        ReloadInputs();
         if (TryGetGeoreferencingReadiness(out string reason))
             Debug.Log($"[SrtDroneRaycastPlayer] Ready. Parsed {frames.Count} SRT frames.", this);
         else
@@ -516,7 +545,15 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
     private void LoadTransformConfig()
     {
         transformData = null;
-        resolvedTransformConfigPath = ResolvePath(transformConfigFilePath, inputPathRoot);
+        if (!TryResolveInputPath(
+                transformConfigFilePath,
+                transformPathJsonKey,
+                out resolvedTransformConfigPath,
+                out string resolveError))
+        {
+            Debug.LogError($"[SrtDroneRaycastPlayer] Could not resolve transform config: {resolveError}", this);
+            return;
+        }
         if (string.IsNullOrWhiteSpace(resolvedTransformConfigPath) || !File.Exists(resolvedTransformConfigPath))
         {
             Debug.LogError($"[SrtDroneRaycastPlayer] Missing transform config: '{resolvedTransformConfigPath}'.", this);
@@ -549,7 +586,15 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         frameIndexByCount.Clear();
         missingFrameCounts.Clear();
         hasDuplicateFrameCounts = false;
-        resolvedSrtPath = ResolvePath(srtFilePath, inputPathRoot);
+        if (!TryResolveInputPath(
+                srtFilePath,
+                srtPathJsonKey,
+                out resolvedSrtPath,
+                out string resolveError))
+        {
+            Debug.LogError($"[SrtDroneRaycastPlayer] Could not resolve SRT path: {resolveError}", this);
+            return;
+        }
 
         if (string.IsNullOrWhiteSpace(resolvedSrtPath) || !File.Exists(resolvedSrtPath))
         {
@@ -777,31 +822,20 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
         return value;
     }
 
-    private static string ResolvePath(string rawPath, FilePathRoot rootMode)
+    private bool TryResolveInputPath(
+        string customPath,
+        string pathJsonKey,
+        out string resolvedPath,
+        out string error)
     {
-        if (string.IsNullOrWhiteSpace(rawPath))
-            return string.Empty;
-        if (Path.IsPathRooted(rawPath))
-            return Path.GetFullPath(rawPath);
-        string root = GetPathRoot(rootMode);
-        return Path.GetFullPath(Path.Combine(root, rawPath.Replace('/', Path.DirectorySeparatorChar)));
-    }
-
-    public static string GetPathRoot(FilePathRoot rootMode)
-    {
-        switch (rootMode)
-        {
-            case FilePathRoot.StreamingAssets:
-                return Application.streamingAssetsPath;
-            case FilePathRoot.PersistentDataPath:
-                return Application.persistentDataPath;
-            case FilePathRoot.DataPath:
-                return Application.dataPath;
-            case FilePathRoot.ProjectRoot:
-            default:
-                DirectoryInfo parent = Directory.GetParent(Application.dataPath);
-                return parent != null ? parent.FullName : Application.dataPath;
-        }
+        return ProjectPathResolver.TryResolveConfiguredPath(
+            customPath,
+            inputPathRoot,
+            useSharedInputPathsJson,
+            sharedInputPathsJsonFile,
+            pathJsonKey,
+            out resolvedPath,
+            out error);
     }
 
     private static bool IsFinite(float value)
@@ -879,14 +913,6 @@ public sealed class SrtDroneRaycastPlayer : MonoBehaviour
             PlaybackTimeSeconds = playbackTimeSeconds;
             PlaybackFrameIndex = playbackFrameIndex;
         }
-    }
-
-    public enum FilePathRoot
-    {
-        ProjectRoot,
-        StreamingAssets,
-        PersistentDataPath,
-        DataPath
     }
 
 }
