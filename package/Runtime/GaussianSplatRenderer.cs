@@ -2,6 +2,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using Newtonsoft.Json.Linq;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
@@ -11,6 +13,9 @@ using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.XR;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 namespace GaussianSplatting.Runtime
 {
@@ -214,6 +219,14 @@ namespace GaussianSplatting.Runtime
     [ExecuteInEditMode]
     public class GaussianSplatRenderer : MonoBehaviour
     {
+        public enum FilePathRoot
+        {
+            ProjectRoot,
+            StreamingAssets,
+            PersistentDataPath,
+            DataPath
+        }
+
         public enum RenderMode
         {
             Splats,
@@ -223,6 +236,17 @@ namespace GaussianSplatting.Runtime
             DebugChunkBounds,
         }
         public GaussianSplatAsset m_Asset;
+
+        [Header("Asset Path Loading")]
+        [Tooltip("Automatically load the configured GaussianSplatAsset when Play Mode starts. The assigned asset is kept if loading fails.")]
+        public bool m_LoadAssetFromPath = true;
+        public string m_AssetPath = "Assets/Scenes/Harokopio/harokopio.asset";
+        public FilePathRoot m_InputPathRoot = FilePathRoot.ProjectRoot;
+
+        [Header("Shared Asset Path Config")]
+        public bool m_UseSharedAssetPathJson = true;
+        public string m_SharedAssetPathsJsonFile = "project_paths.json";
+        public string m_AssetPathJsonKey = "gaussian_splat_asset_path";
 
         [Tooltip("Rendering order compared to other splats. Within same order splats are sorted by distance. Higher order splats render 'on top of' lower order splats.")]
         public int m_RenderOrder;
@@ -283,6 +307,7 @@ namespace GaussianSplatting.Runtime
         GaussianSplatAsset m_PrevAsset;
         Hash128 m_PrevHash;
         bool m_Registered;
+        [NonSerialized] bool m_PlayModeLoadAttempted;
 
         static readonly ProfilerMarker s_ProfSort = new(ProfilerCategory.Render, "GaussianSplat.Sort", MarkerFlags.SampleGPU);
 
@@ -475,6 +500,8 @@ namespace GaussianSplatting.Runtime
         public void OnEnable()
         {
             m_FrameCounter = 0;
+            if (Application.isPlaying)
+                LoadAssetForPlayModeIfNeeded();
             if (!resourcesAreSetUp)
                 return;
 
@@ -482,6 +509,230 @@ namespace GaussianSplatting.Runtime
             EnsureSorterAndRegister();
 
             CreateResourcesForAsset();
+        }
+
+        void Start()
+        {
+            // Fallback for Enter Play Mode configurations where OnEnable is not invoked.
+            if (Application.isPlaying)
+                LoadAssetForPlayModeIfNeeded();
+        }
+
+        void LoadAssetForPlayModeIfNeeded()
+        {
+            if (!m_LoadAssetFromPath || m_PlayModeLoadAttempted)
+                return;
+
+            m_PlayModeLoadAttempted = true;
+            LoadAssetFromConfiguredPath();
+        }
+
+        [ContextMenu("Load Gaussian Splat Asset From Path")]
+        public void LoadAssetFromConfiguredPath()
+        {
+            if (!TryResolveAssetPath(out string resolvedPath))
+                return;
+
+            GaussianSplatAsset loadedAsset = LoadAssetAtResolvedPath(resolvedPath, out string error);
+            if (loadedAsset == null)
+            {
+                Debug.LogError($"[{nameof(GaussianSplatRenderer)}] Failed to load Gaussian splat asset:\n{resolvedPath}\n{error}", this);
+                return;
+            }
+
+            m_Asset = loadedAsset;
+            Debug.Log($"[{nameof(GaussianSplatRenderer)}] Loaded Gaussian splat asset:\n{resolvedPath}", this);
+        }
+
+        [ContextMenu("Validate Gaussian Splat Asset Path")]
+        public void ValidateAssetPath()
+        {
+            if (!TryResolveAssetPath(out string resolvedPath))
+                return;
+
+            GaussianSplatAsset loadedAsset = LoadAssetAtResolvedPath(resolvedPath, out string error);
+            if (loadedAsset == null)
+            {
+                Debug.LogError($"[{nameof(GaussianSplatRenderer)}] Gaussian splat asset path is invalid:\n{resolvedPath}\n{error}", this);
+                return;
+            }
+
+            Debug.Log($"[{nameof(GaussianSplatRenderer)}] Gaussian splat asset path is valid:\n{resolvedPath}\nAsset: {loadedAsset.name}", this);
+        }
+
+        bool TryResolveAssetPath(out string resolvedPath)
+        {
+            resolvedPath = null;
+            string rawPath = m_AssetPath;
+
+            if (m_UseSharedAssetPathJson)
+            {
+                if (!TryReadPathFromStreamingAssetsJson(
+                        m_SharedAssetPathsJsonFile,
+                        m_AssetPathJsonKey,
+                        out rawPath,
+                        out string configError))
+                {
+                    Debug.LogError($"[{nameof(GaussianSplatRenderer)}] Failed to resolve shared asset path: {configError}", this);
+                    return false;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(rawPath))
+            {
+                Debug.LogError($"[{nameof(GaussianSplatRenderer)}] Gaussian splat asset path is empty.", this);
+                return false;
+            }
+
+            try
+            {
+                rawPath = TrimWhitespaceAndWrappingQuotes(rawPath);
+                if (Path.IsPathRooted(rawPath))
+                {
+                    resolvedPath = Path.GetFullPath(rawPath);
+                    return true;
+                }
+
+                resolvedPath = Path.GetFullPath(Path.Combine(GetBaseDirectory(m_InputPathRoot), rawPath));
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError($"[{nameof(GaussianSplatRenderer)}] Failed to resolve asset path '{rawPath}':\n{exception.Message}", this);
+                return false;
+            }
+        }
+
+        static string GetBaseDirectory(FilePathRoot root)
+        {
+            switch (root)
+            {
+                case FilePathRoot.ProjectRoot:
+                    DirectoryInfo parent = Directory.GetParent(Application.dataPath);
+                    return parent != null ? parent.FullName : Application.dataPath;
+                case FilePathRoot.StreamingAssets:
+                    return Application.streamingAssetsPath;
+                case FilePathRoot.PersistentDataPath:
+                    return Application.persistentDataPath;
+                case FilePathRoot.DataPath:
+                default:
+                    return Application.dataPath;
+            }
+        }
+
+        static bool TryReadPathFromStreamingAssetsJson(
+            string configJsonFileName,
+            string jsonKey,
+            out string path,
+            out string error)
+        {
+            path = null;
+            error = null;
+
+            if (string.IsNullOrWhiteSpace(configJsonFileName))
+            {
+                error = "Config JSON file name is empty.";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(jsonKey))
+            {
+                error = "JSON key is empty.";
+                return false;
+            }
+
+            string configPath;
+            try
+            {
+                configPath = Path.Combine(Application.streamingAssetsPath, configJsonFileName);
+                if (!File.Exists(configPath))
+                {
+                    error = "Config JSON file does not exist: " + configPath;
+                    return false;
+                }
+
+                JObject root = JObject.Parse(File.ReadAllText(configPath));
+                JToken pathToken = root.SelectToken(jsonKey, false) ?? root[jsonKey];
+                if (pathToken == null)
+                {
+                    error = $"JSON key '{jsonKey}' is missing from config file: {configPath}";
+                    return false;
+                }
+
+                if (pathToken.Type != JTokenType.String)
+                {
+                    error = $"JSON key '{jsonKey}' must contain a string path.";
+                    return false;
+                }
+
+                path = TrimWhitespaceAndWrappingQuotes(pathToken.Value<string>());
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    error = $"JSON key '{jsonKey}' contains an empty path.";
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "Failed to read shared path config: " + exception.Message;
+                return false;
+            }
+        }
+
+        static GaussianSplatAsset LoadAssetAtResolvedPath(string resolvedPath, out string error)
+        {
+            error = null;
+
+#if UNITY_EDITOR
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string fullPath = Path.GetFullPath(resolvedPath);
+            string relativePath = Path.GetRelativePath(projectRoot, fullPath).Replace('\\', '/');
+            if (relativePath == "Assets" || relativePath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ||
+                relativePath == "Packages" || relativePath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+            {
+                GaussianSplatAsset editorAsset = AssetDatabase.LoadAssetAtPath<GaussianSplatAsset>(relativePath);
+                if (editorAsset != null)
+                    return editorAsset;
+
+                error = "Unity AssetDatabase did not find a GaussianSplatAsset at this project-relative path: " + relativePath;
+                return null;
+            }
+#endif
+
+            string normalized = resolvedPath.Replace('\\', '/');
+            int resourcesIndex = normalized.IndexOf("/Resources/", StringComparison.OrdinalIgnoreCase);
+            if (resourcesIndex >= 0)
+            {
+                string resourcePath = normalized.Substring(resourcesIndex + "/Resources/".Length);
+                resourcePath = Path.ChangeExtension(resourcePath, null);
+                GaussianSplatAsset resourceAsset = Resources.Load<GaussianSplatAsset>(resourcePath);
+                if (resourceAsset != null)
+                    return resourceAsset;
+
+                error = "Resources.Load did not find a GaussianSplatAsset at: " + resourcePath;
+                return null;
+            }
+
+            error = "Runtime loading requires the asset to be inside an Assets/Resources folder. In the Editor, any asset inside Assets or Packages is supported.";
+            return null;
+        }
+
+        static string TrimWhitespaceAndWrappingQuotes(string value)
+        {
+            if (value == null)
+                return null;
+
+            string trimmed = value.Trim();
+            if (trimmed.Length < 2)
+                return trimmed;
+
+            char first = trimmed[0];
+            char last = trimmed[trimmed.Length - 1];
+            return (first == '"' && last == '"') || (first == '\'' && last == '\'')
+                ? trimmed.Substring(1, trimmed.Length - 2).Trim()
+                : trimmed;
         }
 
         void SetAssetDataOnCS(CommandBuffer cmb, KernelIndices kernel)
@@ -566,6 +817,7 @@ namespace GaussianSplatting.Runtime
 
         public void OnDisable()
         {
+            m_PlayModeLoadAttempted = false;
             DisposeResourcesForAsset();
             GaussianSplatRenderSystem.instance.UnregisterSplat(this);
             m_Registered = false;
