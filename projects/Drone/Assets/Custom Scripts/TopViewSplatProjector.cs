@@ -6,6 +6,7 @@ using GaussianSplatting.Runtime;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 /// <summary>
 /// Top-view pipeline:
@@ -15,6 +16,27 @@ using UnityEngine;
 public sealed class TopViewSplatProjector : MonoBehaviour
 {
     private const string Wgs84CoordinateSpace = "WGS84 [longitude, latitude]";
+    private const string VisualizationRootPrefix = "TopViewMaskVisualization_";
+
+    public enum MaskVisualizationMode
+    {
+        FilledSurface,
+        BoundaryOnly,
+        RaycastPoints
+    }
+
+    [Serializable]
+    private sealed class VisualizationClassColor
+    {
+        public string className;
+        public Color color = Color.cyan;
+
+        public VisualizationClassColor(string className, Color color)
+        {
+            this.className = className;
+            this.color = color;
+        }
+    }
 
     [Header("1. References")]
     [SerializeField] private SrtDroneRaycastPlayer player;
@@ -65,10 +87,33 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     [SerializeField] private ProjectPathResolver.PathRoot polygonOutputPathRoot =
         ProjectPathResolver.PathRoot.ProjectRoot;
 
+    [Header("6. Mask visualization")]
+    [SerializeField] private MaskVisualizationMode visualizationMode =
+        MaskVisualizationMode.FilledSurface;
+    [Min(1)]
+    [Tooltip("One ray is cast for each occupied pixel grid cell. Lower values add detail but cost more raycasts and geometry.")]
+    [SerializeField] private int visualizationSampleStepPixels = 8;
+    [Range(0.01f, 1f)] [SerializeField] private float visualizationOpacity = 0.55f;
+    [Min(0f)]
+    [Tooltip("Moves the overlay away from the collider surface along the hit normal to reduce z-fighting.")]
+    [SerializeField] private float visualizationSurfaceOffsetMeters = 0.05f;
+    [Range(0.25f, 2f)] [SerializeField] private float filledCellScale = 1.1f;
+    [Min(0.01f)] [SerializeField] private float pointSizeMeters = 0.5f;
+    [Min(0.01f)] [SerializeField] private float boundaryWidthMeters = 0.25f;
+    [SerializeField] private List<VisualizationClassColor> visualizationClassColors =
+        new List<VisualizationClassColor>
+        {
+            new VisualizationClassColor("building", new Color(0.95f, 0.18f, 0.12f, 1f)),
+            new VisualizationClassColor("green_trees", new Color(0.12f, 0.85f, 0.25f, 1f)),
+            new VisualizationClassColor("water", new Color(0.12f, 0.45f, 1f, 1f)),
+            new VisualizationClassColor("debris", new Color(1f, 0.55f, 0.08f, 1f))
+        };
+
     [NonSerialized] private Camera gameViewPreviewCamera;
     [NonSerialized] private bool hasHeightInfo;
     [NonSerialized] private int heightInfoFrameCount;
     [NonSerialized] private float referenceHeightInfoMeters;
+    [NonSerialized] private GameObject maskVisualizationRoot;
 
     public bool HasCurrentHeightInfo =>
         hasHeightInfo && heightInfoFrameCount == referenceFrameCount;
@@ -216,6 +261,84 @@ public sealed class TopViewSplatProjector : MonoBehaviour
     public void ProjectTopViewMasksToPolygons()
     {
         RunTopViewOperation(false);
+    }
+
+    [ContextMenu("3. Build Mask Visualization")]
+    public void BuildMaskVisualization()
+    {
+        if (player == null)
+        {
+            Debug.LogError("[TopViewSplatProjector] SrtDroneRaycastPlayer reference is missing.", this);
+            return;
+        }
+
+        SrtDroneRaycastPlayer.ProjectionState savedState = player.CaptureProjectionState();
+        Camera temporaryCamera = null;
+#if UNITY_EDITOR
+        SceneDirtinessState dirtiness = SceneDirtinessState.Capture(player, player.DroneViewCamera);
+#endif
+        try
+        {
+            if (!player.TryPrepareForGeoreferencing(out string preparationError))
+            {
+                Debug.LogError(
+                    $"[TopViewSplatProjector] Visualization preparation failed: {preparationError}",
+                    this);
+                return;
+            }
+            if (!TryCreateTopViewCamera(
+                    out temporaryCamera, out TopViewContext context, out string cameraError))
+            {
+                Debug.LogError(
+                    $"[TopViewSplatProjector] Visualization setup failed: {cameraError}", this);
+                return;
+            }
+            if (!TryBuildMaskVisualization(
+                    temporaryCamera, context, out VisualizationSummary summary, out string error))
+            {
+                Debug.LogError($"[TopViewSplatProjector] Visualization failed: {error}", this);
+                return;
+            }
+
+            Debug.Log(
+                $"[TopViewSplatProjector] Built {visualizationMode} visualization for class " +
+                $"'{polygonClassName}' from {summary.AcceptedComponents}/" +
+                $"{summary.DiscoveredComponents} connected component(s) in " +
+                $"{summary.MaskFiles} mask(s). Raycasts succeeded for " +
+                $"{summary.SuccessfulRays}/{summary.AttemptedRays} sample(s); generated " +
+                $"{summary.VisualElements} visual element(s).",
+                this);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError(
+                $"[TopViewSplatProjector] Visualization aborted by an unexpected error: " +
+                $"{exception.Message}", this);
+        }
+        finally
+        {
+            DestroyTemporaryCamera(temporaryCamera);
+            player.RestoreProjectionState(savedState);
+            Physics.SyncTransforms();
+#if UNITY_EDITOR
+            dirtiness.Restore();
+#endif
+        }
+    }
+
+    [ContextMenu("4. Clear Mask Visualization")]
+    public void ClearMaskVisualization()
+    {
+        string rootName = GetVisualizationRootName();
+        Transform[] transforms = Resources.FindObjectsOfTypeAll<Transform>();
+        for (int i = 0; i < transforms.Length; i++)
+        {
+            Transform candidate = transforms[i];
+            if (candidate == null || candidate.parent != null || candidate.name != rootName)
+                continue;
+            DestroyVisualizationHierarchy(candidate.gameObject);
+        }
+        maskVisualizationRoot = null;
     }
 
     private void RunTopViewOperation(bool captureImage)
@@ -671,6 +794,474 @@ public sealed class TopViewSplatProjector : MonoBehaviour
             attemptedRays,
             successfulRays);
         return true;
+    }
+
+    private bool TryBuildMaskVisualization(
+        Camera camera,
+        TopViewContext context,
+        out VisualizationSummary summary,
+        out string error)
+    {
+        summary = default;
+        error = string.Empty;
+        string resolvedMaskPath;
+        try
+        {
+            resolvedMaskPath = ResolvePath(maskPath, maskPathRoot);
+        }
+        catch (Exception exception)
+        {
+            return Fail($"Invalid mask path: {exception.Message}", out error);
+        }
+        if (!TryDiscoverMaskFiles(resolvedMaskPath, out List<string> files, out error))
+            return false;
+        if (string.IsNullOrWhiteSpace(polygonClassName))
+            return Fail("Polygon Class Name is empty.", out error);
+
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (shader == null)
+            shader = Shader.Find("Unlit/Color");
+        if (shader == null)
+            return Fail("Could not find an unlit shader for the mask overlay.", out error);
+
+        GameObject root = GetOrCreateVisualizationRoot();
+        string classObjectName = "Class_" + SanitizeId(polygonClassName);
+        Transform previousClass = root.transform.Find(classObjectName);
+        GameObject candidate = new GameObject(classObjectName + "_Building")
+        {
+            hideFlags = HideFlags.DontSave
+        };
+        candidate.transform.SetParent(root.transform, false);
+        Material material = CreateVisualizationMaterial(
+            shader, GetVisualizationColor(polygonClassName));
+        bool materialAttached = false;
+        bool completed = false;
+        try
+        {
+            int discoveredComponents = 0;
+            int acceptedComponents = 0;
+            int attemptedRays = 0;
+            int successfulRays = 0;
+            int renderedElements = 0;
+            int sampleStep = Mathf.Max(1, visualizationSampleStepPixels);
+            var occupiedGridCells = new HashSet<long>();
+            var hits = new List<VisualizationHit>();
+
+            float horizontalWorldUnitsPerMetre = 1f;
+            if (player.TryConvertEnuOffsetToWorldVector(Vector3.right, out Vector3 eastMetre) &&
+                player.TryConvertEnuOffsetToWorldVector(Vector3.up, out Vector3 northMetre))
+            {
+                horizontalWorldUnitsPerMetre =
+                    Mathf.Max(0.000001f, (eastMetre.magnitude + northMetre.magnitude) * 0.5f);
+            }
+            float surfaceOffsetWorld =
+                Mathf.Max(0f, visualizationSurfaceOffsetMeters) * horizontalWorldUnitsPerMetre;
+
+            for (int fileIndex = 0; fileIndex < files.Count; fileIndex++)
+            {
+                if (!TryLoadForegroundMask(
+                        files[fileIndex], out ForegroundMask mask, out string maskError))
+                {
+                    Debug.LogWarning(
+                        $"[TopViewSplatProjector] Omitted visualization mask " +
+                        $"'{files[fileIndex]}': {maskError}", this);
+                    continue;
+                }
+                if (mask.Width != context.ImageWidth || mask.Height != context.ImageHeight)
+                {
+                    Debug.LogWarning(
+                        $"[TopViewSplatProjector] Omitted visualization mask " +
+                        $"'{files[fileIndex]}': dimensions {mask.Width}x{mask.Height} do not " +
+                        $"match the top-view capture {context.ImageWidth}x{context.ImageHeight}.",
+                        this);
+                    continue;
+                }
+
+                List<PixelComponent> components = FindConnectedComponents(mask);
+                discoveredComponents += components.Count;
+                for (int componentIndex = 0; componentIndex < components.Count; componentIndex++)
+                {
+                    PixelComponent component = components[componentIndex];
+                    if (component.Pixels.Count < minimumComponentPixels)
+                        continue;
+                    acceptedComponents++;
+
+                    if (visualizationMode == MaskVisualizationMode.BoundaryOnly)
+                    {
+                        int linePoints = BuildBoundaryVisualization(
+                            camera,
+                            mask,
+                            component,
+                            candidate.transform,
+                            material,
+                            surfaceOffsetWorld,
+                            Mathf.Max(0.0001f, boundaryWidthMeters * horizontalWorldUnitsPerMetre),
+                            ref attemptedRays,
+                            ref successfulRays);
+                        if (linePoints > 0)
+                        {
+                            renderedElements++;
+                            materialAttached = true;
+                        }
+                        continue;
+                    }
+
+                    var componentCells = new Dictionary<long, PixelCellAccumulator>();
+                    for (int pixelIndex = 0; pixelIndex < component.Pixels.Count; pixelIndex++)
+                    {
+                        int index = component.Pixels[pixelIndex];
+                        int x = index % mask.Width;
+                        int y = index / mask.Width;
+                        int cellX = x / sampleStep;
+                        int cellY = y / sampleStep;
+                        long cellKey = ((long)cellX << 32) | (uint)cellY;
+                        if (componentCells.TryGetValue(
+                                cellKey, out PixelCellAccumulator accumulator))
+                        {
+                            accumulator.Add(x + 0.5, y + 0.5);
+                            componentCells[cellKey] = accumulator;
+                        }
+                        else
+                        {
+                            componentCells.Add(
+                                cellKey, new PixelCellAccumulator(x + 0.5, y + 0.5));
+                        }
+                    }
+
+                    foreach (KeyValuePair<long, PixelCellAccumulator> pair in componentCells)
+                    {
+                        if (!occupiedGridCells.Add(pair.Key))
+                            continue;
+                        attemptedRays++;
+                        PixelPoint sample = pair.Value.Centroid;
+                        if (!TryRaycastMaskPixel(
+                                camera, mask, sample, surfaceOffsetWorld, out VisualizationHit hit))
+                            continue;
+                        hits.Add(hit);
+                        successfulRays++;
+                    }
+                }
+            }
+
+            if (visualizationMode != MaskVisualizationMode.BoundaryOnly && hits.Count > 0)
+            {
+                float markerSizeWorld = visualizationMode ==
+                    MaskVisualizationMode.RaycastPoints
+                    ? Mathf.Max(0.0001f, pointSizeMeters * horizontalWorldUnitsPerMetre)
+                    : EstimateFilledCellSizeWorld(
+                        context, sampleStep, horizontalWorldUnitsPerMetre);
+                BuildSurfaceMarkerMesh(candidate, hits, markerSizeWorld, material);
+                renderedElements = hits.Count;
+                materialAttached = true;
+            }
+
+            if (renderedElements == 0)
+                return Fail(
+                    "No visualization geometry could be projected from the discovered masks.",
+                    out error);
+
+            if (previousClass != null)
+                DestroyVisualizationHierarchy(previousClass.gameObject);
+            candidate.name = classObjectName;
+            summary = new VisualizationSummary(
+                files.Count,
+                discoveredComponents,
+                acceptedComponents,
+                renderedElements,
+                attemptedRays,
+                successfulRays);
+            completed = true;
+            return true;
+        }
+        finally
+        {
+            if (!completed)
+            {
+                DestroyVisualizationHierarchy(candidate);
+                if (!materialAttached)
+                    DestroyObject(material);
+            }
+        }
+    }
+
+    private int BuildBoundaryVisualization(
+        Camera camera,
+        ForegroundMask mask,
+        PixelComponent component,
+        Transform parent,
+        Material material,
+        float surfaceOffsetWorld,
+        float lineWidthWorld,
+        ref int attemptedRays,
+        ref int successfulRays)
+    {
+        List<PixelPoint> contour = TraceLargestOuterContour(component, mask.Width);
+        contour = RemoveCollinearVertices(contour);
+        contour = SimplifyClosedRing(contour, Mathf.Max(0f, contourSimplificationPixels));
+        contour = LimitRingVertices(contour, Mathf.Max(3, maximumContourVertices));
+        if (contour.Count < 3)
+            return 0;
+
+        var positions = new List<Vector3>(contour.Count);
+        for (int i = 0; i < contour.Count; i++)
+        {
+            attemptedRays++;
+            PixelPoint sample = InsetContourPoint(contour[i], component, contourInsetPixels);
+            if (!TryRaycastMaskPixel(
+                    camera, mask.Width, mask.Height, sample.X, sample.Y, out RaycastHit hit))
+                continue;
+            positions.Add(hit.point + hit.normal.normalized * surfaceOffsetWorld);
+            successfulRays++;
+        }
+        if (positions.Count < 3)
+            return 0;
+
+        GameObject lineObject = new GameObject("Boundary")
+        {
+            hideFlags = HideFlags.DontSave
+        };
+        lineObject.transform.SetParent(parent, false);
+        LineRenderer line = lineObject.AddComponent<LineRenderer>();
+        line.useWorldSpace = true;
+        line.loop = true;
+        line.positionCount = positions.Count;
+        line.SetPositions(positions.ToArray());
+        line.startWidth = lineWidthWorld;
+        line.endWidth = lineWidthWorld;
+        line.numCornerVertices = 2;
+        line.numCapVertices = 2;
+        line.sharedMaterial = material;
+        line.shadowCastingMode = ShadowCastingMode.Off;
+        line.receiveShadows = false;
+        return positions.Count;
+    }
+
+    private bool TryRaycastMaskPixel(
+        Camera camera,
+        int imageWidth,
+        int imageHeight,
+        double pixelX,
+        double pixelY,
+        out RaycastHit hit)
+    {
+        float viewportX = Mathf.Clamp01((float)(pixelX / imageWidth));
+        float viewportY = Mathf.Clamp01((float)(pixelY / imageHeight));
+        Ray ray = camera.ViewportPointToRay(new Vector3(viewportX, viewportY, 0f));
+        return player.TryRaycastMap(ray, out hit);
+    }
+
+    private bool TryRaycastMaskPixel(
+        Camera camera,
+        ForegroundMask mask,
+        PixelPoint sample,
+        float surfaceOffsetWorld,
+        out VisualizationHit visualizationHit)
+    {
+        visualizationHit = default;
+        if (!TryRaycastMaskPixel(
+                camera, mask.Width, mask.Height, sample.X, sample.Y, out RaycastHit hit))
+            return false;
+        Vector3 normal = hit.normal.sqrMagnitude > 0.000001f
+            ? hit.normal.normalized
+            : -camera.transform.forward;
+        visualizationHit = new VisualizationHit(
+            hit.point + normal * surfaceOffsetWorld, normal);
+        return true;
+    }
+
+    private float EstimateFilledCellSizeWorld(
+        TopViewContext context,
+        int sampleStep,
+        float horizontalWorldUnitsPerMetre)
+    {
+        float metresPerPixelX = context.CoverageWidthMeters /
+                                Mathf.Max(1, context.ImageWidth);
+        float metresPerPixelY = context.CoverageHeightMeters /
+                                Mathf.Max(1, context.ImageHeight);
+        float cellMetres = Mathf.Max(metresPerPixelX, metresPerPixelY) *
+                           Mathf.Max(1, sampleStep);
+        return Mathf.Max(
+            0.0001f,
+            cellMetres * Mathf.Max(0.01f, filledCellScale) *
+            horizontalWorldUnitsPerMetre);
+    }
+
+    private static void BuildSurfaceMarkerMesh(
+        GameObject parent,
+        List<VisualizationHit> hits,
+        float markerSizeWorld,
+        Material material)
+    {
+        GameObject surfaceObject = new GameObject("Surface")
+        {
+            hideFlags = HideFlags.DontSave
+        };
+        surfaceObject.transform.SetParent(parent.transform, false);
+
+        var vertices = new Vector3[hits.Count * 4];
+        var normals = new Vector3[hits.Count * 4];
+        var uv = new Vector2[hits.Count * 4];
+        var triangles = new int[hits.Count * 6];
+        float halfSize = markerSizeWorld * 0.5f;
+        for (int i = 0; i < hits.Count; i++)
+        {
+            VisualizationHit hit = hits[i];
+            Vector3 normal = hit.Normal.sqrMagnitude > 0.000001f
+                ? hit.Normal.normalized
+                : Vector3.up;
+            Vector3 tangent = Vector3.ProjectOnPlane(Vector3.right, normal);
+            if (tangent.sqrMagnitude <= 0.000001f)
+                tangent = Vector3.ProjectOnPlane(Vector3.forward, normal);
+            tangent.Normalize();
+            Vector3 bitangent = Vector3.Cross(normal, tangent).normalized;
+            Vector3 right = tangent * halfSize;
+            Vector3 up = bitangent * halfSize;
+            int vertex = i * 4;
+            vertices[vertex] = hit.Position - right - up;
+            vertices[vertex + 1] = hit.Position + right - up;
+            vertices[vertex + 2] = hit.Position + right + up;
+            vertices[vertex + 3] = hit.Position - right + up;
+            normals[vertex] = normals[vertex + 1] =
+                normals[vertex + 2] = normals[vertex + 3] = normal;
+            uv[vertex] = new Vector2(0f, 0f);
+            uv[vertex + 1] = new Vector2(1f, 0f);
+            uv[vertex + 2] = new Vector2(1f, 1f);
+            uv[vertex + 3] = new Vector2(0f, 1f);
+            int triangle = i * 6;
+            triangles[triangle] = vertex;
+            triangles[triangle + 1] = vertex + 2;
+            triangles[triangle + 2] = vertex + 1;
+            triangles[triangle + 3] = vertex;
+            triangles[triangle + 4] = vertex + 3;
+            triangles[triangle + 5] = vertex + 2;
+        }
+
+        var mesh = new Mesh
+        {
+            name = "TopViewMaskVisualizationMesh",
+            hideFlags = HideFlags.DontSave,
+            indexFormat = hits.Count * 4 > ushort.MaxValue
+                ? IndexFormat.UInt32
+                : IndexFormat.UInt16
+        };
+        mesh.vertices = vertices;
+        mesh.normals = normals;
+        mesh.uv = uv;
+        mesh.triangles = triangles;
+        mesh.RecalculateBounds();
+        surfaceObject.AddComponent<MeshFilter>().sharedMesh = mesh;
+        MeshRenderer renderer = surfaceObject.AddComponent<MeshRenderer>();
+        renderer.sharedMaterial = material;
+        renderer.shadowCastingMode = ShadowCastingMode.Off;
+        renderer.receiveShadows = false;
+    }
+
+    private Color GetVisualizationColor(string className)
+    {
+        if (visualizationClassColors != null)
+        {
+            for (int i = 0; i < visualizationClassColors.Count; i++)
+            {
+                VisualizationClassColor entry = visualizationClassColors[i];
+                if (entry != null &&
+                    string.Equals(
+                        entry.className?.Trim(),
+                        className?.Trim(),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    Color configured = entry.color;
+                    configured.a = Mathf.Clamp01(visualizationOpacity);
+                    return configured;
+                }
+            }
+        }
+
+        int hash = StringComparer.OrdinalIgnoreCase.GetHashCode(className ?? string.Empty);
+        float hue = ((uint)hash % 997u) / 997f;
+        Color generated = Color.HSVToRGB(hue, 0.75f, 1f);
+        generated.a = Mathf.Clamp01(visualizationOpacity);
+        return generated;
+    }
+
+    private static Material CreateVisualizationMaterial(Shader shader, Color color)
+    {
+        var material = new Material(shader)
+        {
+            name = "TopViewMaskVisualizationMaterial",
+            color = color,
+            hideFlags = HideFlags.DontSave,
+            renderQueue = (int)RenderQueue.Transparent + 100
+        };
+        if (material.HasProperty("_BaseColor"))
+            material.SetColor("_BaseColor", color);
+        if (material.HasProperty("_Surface"))
+            material.SetFloat("_Surface", 1f);
+        if (material.HasProperty("_SrcBlend"))
+            material.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
+        if (material.HasProperty("_DstBlend"))
+            material.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+        if (material.HasProperty("_ZWrite"))
+            material.SetFloat("_ZWrite", 0f);
+        if (material.HasProperty("_Cull"))
+            material.SetFloat("_Cull", (float)CullMode.Off);
+        material.SetOverrideTag("RenderType", "Transparent");
+        material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+        return material;
+    }
+
+    private GameObject GetOrCreateVisualizationRoot()
+    {
+        if (maskVisualizationRoot != null)
+            return maskVisualizationRoot;
+        string rootName = GetVisualizationRootName();
+        Transform[] transforms = Resources.FindObjectsOfTypeAll<Transform>();
+        for (int i = 0; i < transforms.Length; i++)
+        {
+            Transform candidate = transforms[i];
+            if (candidate != null && candidate.parent == null && candidate.name == rootName)
+            {
+                maskVisualizationRoot = candidate.gameObject;
+                return maskVisualizationRoot;
+            }
+        }
+        maskVisualizationRoot = new GameObject(rootName)
+        {
+            hideFlags = HideFlags.DontSave
+        };
+        return maskVisualizationRoot;
+    }
+
+    private string GetVisualizationRootName()
+    {
+        return VisualizationRootPrefix + SanitizeId(gameObject.name);
+    }
+
+    private static void DestroyVisualizationHierarchy(GameObject root)
+    {
+        if (root == null)
+            return;
+        var resources = new HashSet<UnityEngine.Object>();
+        MeshFilter[] filters = root.GetComponentsInChildren<MeshFilter>(true);
+        for (int i = 0; i < filters.Length; i++)
+        {
+            if (filters[i] != null && filters[i].sharedMesh != null)
+                resources.Add(filters[i].sharedMesh);
+        }
+        Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            if (renderers[i] == null)
+                continue;
+            Material[] materials = renderers[i].sharedMaterials;
+            for (int materialIndex = 0; materialIndex < materials.Length; materialIndex++)
+            {
+                if (materials[materialIndex] != null)
+                    resources.Add(materials[materialIndex]);
+            }
+        }
+        DestroyObject(root);
+        foreach (UnityEngine.Object resource in resources)
+            DestroyObject(resource);
     }
 
     private bool TryBuildPolygonFeature(
@@ -1490,6 +2081,67 @@ public sealed class TopViewSplatProjector : MonoBehaviour
         public bool SameHorizontalPosition(GeoCoordinate other)
         {
             return Longitude.Equals(other.Longitude) && Latitude.Equals(other.Latitude);
+        }
+    }
+
+    private struct PixelCellAccumulator
+    {
+        private double sumX;
+        private double sumY;
+        private int count;
+
+        public PixelPoint Centroid => new PixelPoint(sumX / count, sumY / count);
+
+        public PixelCellAccumulator(double x, double y)
+        {
+            sumX = x;
+            sumY = y;
+            count = 1;
+        }
+
+        public void Add(double x, double y)
+        {
+            sumX += x;
+            sumY += y;
+            count++;
+        }
+    }
+
+    private readonly struct VisualizationHit
+    {
+        public readonly Vector3 Position;
+        public readonly Vector3 Normal;
+
+        public VisualizationHit(Vector3 position, Vector3 normal)
+        {
+            Position = position;
+            Normal = normal;
+        }
+    }
+
+    private readonly struct VisualizationSummary
+    {
+        public readonly int MaskFiles;
+        public readonly int DiscoveredComponents;
+        public readonly int AcceptedComponents;
+        public readonly int VisualElements;
+        public readonly int AttemptedRays;
+        public readonly int SuccessfulRays;
+
+        public VisualizationSummary(
+            int maskFiles,
+            int discoveredComponents,
+            int acceptedComponents,
+            int visualElements,
+            int attemptedRays,
+            int successfulRays)
+        {
+            MaskFiles = maskFiles;
+            DiscoveredComponents = discoveredComponents;
+            AcceptedComponents = acceptedComponents;
+            VisualElements = visualElements;
+            AttemptedRays = attemptedRays;
+            SuccessfulRays = successfulRays;
         }
     }
 

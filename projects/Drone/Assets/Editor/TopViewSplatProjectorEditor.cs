@@ -10,6 +10,21 @@ public sealed class TopViewSplatProjectorEditor : Editor
 
         var projector = (TopViewSplatProjector)target;
         EditorGUILayout.Space(10f);
+        EditorGUILayout.LabelField("Mask Visualization", EditorStyles.boldLabel);
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            if (GUILayout.Button("Build Visualization"))
+                projector.BuildMaskVisualization();
+            if (GUILayout.Button("Clear Visualization"))
+                projector.ClearMaskVisualization();
+        }
+        EditorGUILayout.HelpBox(
+            "Build replaces only the visualization for the current Polygon Class Name. " +
+            "Change the class name and Mask Path, then build again to keep multiple classes " +
+            "visible with different colours.",
+            MessageType.Info);
+
+        EditorGUILayout.Space(10f);
         EditorGUILayout.LabelField("Calculated Height", EditorStyles.boldLabel);
 
         if (GUILayout.Button("Refresh Height Info"))
