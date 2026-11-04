@@ -1,0 +1,31 @@
+name: UAV projection core
+on:
+  push:
+    paths:
+      - 'projects/Drone/Assets/Custom Scripts/**'
+      - 'projects/Drone/Assets/Editor/UavProjectionChecks.cs'
+      - 'tests/**'
+      - '.github/workflows/uav-projection-core.yml'
+  pull_request:
+    paths:
+      - 'projects/Drone/Assets/Custom Scripts/**'
+      - 'projects/Drone/Assets/Editor/UavProjectionChecks.cs'
+      - 'tests/**'
+      - '.github/workflows/uav-projection-core.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install standalone compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mono-mcs libnewtonsoft-json-cil-dev
+      - name: Run the actual C# core checks
+        run: |
+          export NEWTONSOFT_DLL="$(find /usr/lib/cli -name Newtonsoft.Json.dll -print -quit)"
+          tests/run-core-checks.sh

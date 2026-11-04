@@ -148,7 +148,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: a79441f348de89743a2939f4d699eac1, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Unity.RenderPipelines.Universal.Runtime::UnityEngine.Rendering.Universal.UniversalAdditionalCameraData
   m_RenderShadows: 1
   m_RequiresDepthTextureOption: 2
@@ -267,6 +267,7 @@ GameObject:
   - component: {fileID: 1981751923}
   - component: {fileID: 1981751924}
   - component: {fileID: 1981751925}
+  - component: {fileID: 1981751926}
   m_Layer: 0
   m_Name: DroneSimulation
   m_TagString: Untagged
@@ -299,7 +300,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8349b55471c94e84387359473d1f0987, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::SrtDroneRaycastPlayer
   srtFilePath: Assets/StreamingAssets/Harokopio/harokopio.srt
   transformConfigFilePath: Assets/StreamingAssets/Harokopio/harokopio.json
@@ -312,6 +313,7 @@ MonoBehaviour:
   useAbsAltitude: 1
   playbackSpeed: 1
   loopPlayback: 0
+  playTrajectory: 1
   interpolateFrames: 1
   flipPositionX: 1
   flipPositionY: 0
@@ -345,33 +347,49 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 77a58c2119b14a52b1e91d34d672f808, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::TopViewSplatProjector
+  m_Name:
+  m_EditorClassIdentifier: Assembly-CSharp::PolygonProjector
   player: {fileID: 1981751924}
-  gaussianSplatRenderer: {fileID: 8095100131712225814}
-  referenceFrameCount: 1
-  heightOffsetMeters: 200
-  imageRotationDegrees: 0
-  captureSceneLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  captureBackground: {r: 0, g: 0, b: 0, a: 1}
-  captureWidth: 2048
-  capturePngPath: Exports/top_view_splat.png
-  capturePathRoot: 0
-  maskPath: Exports/top_view_masks
-  maskPathRoot: 0
-  polygonClassName: building
-  foregroundThreshold: 0.5
-  useAlphaAsForeground: 0
-  invertForeground: 0
-  minimumComponentPixels: 64
-  contourSimplificationPixels: 2
-  maximumContourVertices: 1000
-  contourInsetPixels: 0.35
-  minimumSuccessfulRayFraction: 0.5
-  polygonGeoJsonPath: Exports/top_view_polygons.geojson
-  polygonOutputPathRoot: 0
+  observationsJsonPath:
+  inputPathRoot: 0
+  outputPathRoot: 2
+  raysPerUpdate: 256
+  showDebug: 1
+  showRays: 0
+  showLabels: 0
+  maximumDebugSamples: 300
+  markerSize: 0.08
+  logSummary: 1
+  outputGeoJsonPath: Exports/uav_polygons.geojson
+  photoPath:
+  photoSrtPath:
+  captureFrameCount: 1
+  maximumSampleSpacingPixels: 32
+  maximumVerticesPerObservation: 8192
+--- !u!114 &1981751926
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1981751921}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5ddb72930282488da6b6a9d0042e81a2, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Assembly-CSharp::PointProjector
+  player: {fileID: 1981751924}
+  observationsJsonPath:
+  inputPathRoot: 0
+  outputPathRoot: 2
+  raysPerUpdate: 256
+  showDebug: 1
+  showRays: 0
+  showLabels: 0
+  maximumDebugSamples: 300
+  markerSize: 0.08
+  logSummary: 1
+  outputGeoJsonPath: Exports/uav_points.geojson
 --- !u!23 &1464814104600207091
 MeshRenderer:
   m_ObjectHideFlags: 0
@@ -488,7 +506,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f1854c94956883947b41b1eddf12a530, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::MapColliderSync
   MapTransform: {fileID: 7423223985153383410}
   GaussianRenderer: {fileID: 8355386886639151933}
@@ -545,7 +563,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: b106e75bd2a17e64599a561032f4db88, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::ColmapGaussianRotationAligner
   gaussianRenderer: {fileID: 8355386886639151933}
   mapColliderSync: {fileID: 6899962630616225025}
@@ -601,7 +619,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: b7dbdc214d825ea4cb3b57cbdabed094, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::MeshPathJsonLoader
   meshPath: Assets/Scenes/Harokopio/harokopio.obj
   inputPathRoot: 0
@@ -620,9 +638,9 @@ MonoBehaviour:
   loadOnEnable: 0
   requireFileExists: 1
   logDetails: 1
-  lastResolvedJsonPath: 
-  lastResolvedMeshPath: 
-  lastStatus: 
+  lastResolvedJsonPath:
+  lastResolvedMeshPath:
+  lastStatus:
 --- !u!114 &8095100131712225814
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -633,8 +651,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: c12d929a7f62c48adbe9ff45c9a33ff0, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
+  m_Name:
+  m_EditorClassIdentifier:
   m_Asset: {fileID: 0}
   m_LoadAssetFromPath: 1
   m_AssetPath: Assets/Scenes/Harokopio/harokopio.asset
@@ -680,3 +698,4 @@ SceneRoots:
   - {fileID: 5763572441364102360}
   - {fileID: 1981751923}
   - {fileID: 1936490458}
+
