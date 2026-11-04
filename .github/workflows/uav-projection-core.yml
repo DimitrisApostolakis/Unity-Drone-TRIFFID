@@ -21,11 +21,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Install standalone compiler
+      - name: Run the actual C# core checks with the installed SDK
+        shell: bash
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq mono-mcs libnewtonsoft-json-cil-dev
-      - name: Run the actual C# core checks
-        run: |
-          export NEWTONSOFT_DLL="$(find /usr/lib/cli -name Newtonsoft.Json.dll -print -quit)"
-          tests/run-core-checks.sh
+          sdk_version="$(dotnet --version)"
+          sdk_root="$(dirname "$(readlink -f "$(command -v dotnet)")")/sdk/$sdk_version"
+          framework="net${sdk_version%%.*}.0"
+          printf '%s' '<configuration><packageSources><clear /></packageSources></configuration>' > /tmp/uav-nuget.config
+          dotnet restore tests/UavCoreChecks.csproj --configfile /tmp/uav-nuget.config -p:CoreTargetFramework="$framework" -p:NewtonsoftPath="$sdk_root/Newtonsoft.Json.dll"
+          dotnet run --project tests/UavCoreChecks.csproj --no-restore -p:CoreTargetFramework="$framework" -p:NewtonsoftPath="$sdk_root/Newtonsoft.Json.dll"

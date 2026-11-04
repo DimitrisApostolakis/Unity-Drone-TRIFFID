@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework Condition="'$(CoreTargetFramework)' == ''">net8.0</TargetFramework>
+    <TargetFramework Condition="'$(CoreTargetFramework)' != ''">$(CoreTargetFramework)</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(NewtonsoftPath)</HintPath></Reference>
+    <Compile Include="Support/UnityVectors.cs" />
+    <Compile Include="../projects/Drone/Assets/Custom Scripts/UavProjection/UavObservationDocument.cs" />
+    <Compile Include="../projects/Drone/Assets/Custom Scripts/UavProjection/UavMaskContours.cs" />
+    <Compile Include="../projects/Drone/Assets/Custom Scripts/UavProjection/UavGeoJsonRing.cs" />
+    <Compile Include="../projects/Drone/Assets/Editor/UavProjectionChecks.cs" />
+  </ItemGroup>
+</Project>
