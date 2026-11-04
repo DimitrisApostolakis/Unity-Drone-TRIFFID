@@ -62,6 +62,7 @@ public sealed class UavProjectorInspector : Editor
                 if (GUILayout.Button("Cancel")) projector.CancelProjection();
             if (GUILayout.Button("Clear Debug")) { projector.ClearDebug(); SceneView.RepaintAll(); }
         }
+        using(new EditorGUI.DisabledScope(projector.IsRunning))
         if(!polygons && GUILayout.Button("Add / Select Duplicate Merger"))
         {
             var merger=projector.GetComponent<PointDuplicateMerger>();

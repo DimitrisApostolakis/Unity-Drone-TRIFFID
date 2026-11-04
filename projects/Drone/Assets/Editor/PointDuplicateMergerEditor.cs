@@ -22,7 +22,8 @@ public sealed class PointDuplicateMergerEditor : Editor
             }
         using(new EditorGUILayout.HorizontalScope())
         {
-            if(GUILayout.Button("Merge & Export")) merger.MergeAndExport();
+            using(new EditorGUI.DisabledScope(projector!=null && projector.IsRunning))
+                if(GUILayout.Button("Merge & Export")) merger.MergeAndExport();
             if(GUILayout.Button("Clear Debug")) { merger.ClearDebug();SceneView.RepaintAll(); }
         }
         EditorGUILayout.HelpBox(merger.Status,MessageType.None);

@@ -45,6 +45,8 @@ public sealed class PointDuplicateMerger : MonoBehaviour
     {
         try
         {
+            var projector=GetComponent<PointProjector>();
+            if(projector!=null && projector.IsRunning) throw new InvalidOperationException("Wait for PointProjector to finish before merging.");
             matching.Validate();
             string input=Resolve(projectedPointsPath,inputPathRoot), objects=Resolve(objectsPath,outputPathRoot),report=Resolve(reportPath,outputPathRoot);
             if(string.Equals(input,objects,StringComparison.OrdinalIgnoreCase)||string.Equals(input,report,StringComparison.OrdinalIgnoreCase)||

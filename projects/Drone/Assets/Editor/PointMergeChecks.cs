@@ -61,7 +61,7 @@ public static class PointMergeChecks
             { ["schema_version"]="triffid.uav.projected.v1",["kind"]="point_detections",["evidence_space"]="local_enu_metres_v1" },
             ["features"]=new JArray(single[0].Feature.DeepClone()) };
         Check(PointMergeEvidence.Read(raw).Count==1,"Projection evidence schema roundtrip failed.");checks++;
-        raw["projection"].Remove();bool rejected=false;
+        raw.Property("projection").Remove();bool rejected=false;
         try { PointMergeEvidence.Read(raw); } catch(System.IO.InvalidDataException) { rejected=true; }
         Check(rejected,"Legacy/missing evidence should request a fresh point projection.");checks++;
         var samples=single[0].Mask.ForegroundSamples(25).ToList();
