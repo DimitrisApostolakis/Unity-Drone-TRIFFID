@@ -66,7 +66,7 @@ Select the projector's GameObject and enable Scene Gizmos. Cyan markers indicate
 
 Both outputs are GeoJSON FeatureCollections in `[longitude, latitude, altitude]` order. Features preserve class/source/observation IDs and mask-derived image metadata; surface-hit records include world position, normal, distance, collider and triangle index. Point and polygon files are independent. `projection.skipped_observations` lists failures.
 
-**These remain observations.** Cross-view duplicate merging, object tracking and geographic fusion are not implemented by this change. This means a vehicle seen from several views remains several point features.
+**The point export remains raw observations.** A vehicle seen from several views remains several raw point features. The optional [PointDuplicateMerger](point-duplicate-merging.md) groups static cross-view observations into a separate object export, with sampled mask evidence and a report. Polygon fusion and moving-object tracking are separate work.
 
 Completed output is written by atomic replacement. Invalid input or cancellation leaves the previous file intact. Projection raycasts reuse a growing non-allocating hit buffer; a full buffer is retried so target filtering cannot silently discard nearer hits.
 

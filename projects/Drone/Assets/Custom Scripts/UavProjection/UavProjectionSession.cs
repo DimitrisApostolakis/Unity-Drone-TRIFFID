@@ -15,11 +15,31 @@ namespace Triffid.Uav
         public int AttemptedRays, SuccessfulRays;
         private readonly SrtDroneRaycastPlayer player;
         private readonly UavProjectionDebug debug;
+        private readonly Matrix4x4 worldToMetric;
+        public readonly bool HasMetricFrame;
+        public JArray MetricFrame => Matrix(worldToMetric);
+        public static JArray Matrix(Matrix4x4 matrix)
+        {
+            var values=new JArray();
+            for(int row=0;row<4;row++) for(int col=0;col<4;col++) values.Add(matrix[row,col]);
+            return values;
+        }
 
         public UavProjectionSession(SrtDroneRaycastPlayer calibration, UavProjectionDebug debug)
         {
             player = calibration;
             this.debug = debug;
+            var metricToWorld=Matrix4x4.identity;
+            if(player.TryConvertEnuOffsetToWorldVector(new Vector3(1,0,0),out Vector3 east) &&
+                player.TryConvertEnuOffsetToWorldVector(new Vector3(0,1,0),out Vector3 north) &&
+                player.TryConvertEnuOffsetToWorldVector(new Vector3(0,0,1),out Vector3 up))
+            {
+                metricToWorld.SetColumn(0,new Vector4(east.x,east.y,east.z,0));
+                metricToWorld.SetColumn(1,new Vector4(north.x,north.y,north.z,0));
+                metricToWorld.SetColumn(2,new Vector4(up.x,up.y,up.z,0));
+                HasMetricFrame=Mathf.Abs(metricToWorld.determinant)>1e-12f;
+            }
+            worldToMetric=metricToWorld.inverse;
             var obj = new GameObject("UAV Projection Camera") { hideFlags = HideFlags.HideAndDontSave };
             Camera = obj.AddComponent<Camera>();
             if (player.DroneViewCamera != null) Camera.CopyFrom(player.DroneViewCamera);
@@ -28,7 +48,7 @@ namespace Triffid.Uav
             Camera.rect = new Rect(0, 0, 1, 1);
         }
         public bool Project(Vector2 pixelEdgePosition, UavObservationSource source, string label,
-            out JArray coordinates, out JObject surface, out Vector3 world)
+            out JArray coordinates, out JObject surface, out Vector3 world, bool recordDebug=true)
         {
             AttemptedRays++;
             Ray ray = Camera.ViewportPointToRay(new Vector3(pixelEdgePosition.x / source.Width,
@@ -36,7 +56,7 @@ namespace Triffid.Uav
             coordinates = null; surface = null; world = default;
             if (!player.TryRaycastMap(ray, out RaycastHit hit))
             {
-                debug.Ray(ray.origin, ray.GetPoint(25f), false, label);
+                if(recordDebug) debug.Ray(ray.origin, ray.GetPoint(25f), false, label);
                 return false;
             }
             if (!player.TryConvertWorldToWgs84(hit.point, out double lon, out double lat, out double alt)) return false;
@@ -50,7 +70,8 @@ namespace Triffid.Uav
                 ["distance"] = hit.distance, ["triangle_index"] = hit.triangleIndex,
                 ["collider"] = hit.collider.name
             };
-            debug.Ray(ray.origin, hit.point, true, label);
+            if(HasMetricFrame) surface["enu_xyz_m"]=Vector(worldToMetric.MultiplyPoint3x4(hit.point));
+            if(recordDebug) debug.Ray(ray.origin, hit.point, true, label);
             return true;
         }
         public JObject Properties(UavObservationSource source, JObject observation)

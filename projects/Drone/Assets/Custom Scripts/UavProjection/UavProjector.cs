@@ -36,6 +36,7 @@ namespace Triffid.Uav
         private IEnumerator job;
         private Coroutine coroutine;
         public bool IsRunning => job != null;
+        public string LastExportPath { get; private set; }
         public string Status { get; protected set; } = "Ready";
         protected abstract string TaskName { get; }
         protected abstract string Geometry { get; }
@@ -118,6 +119,7 @@ namespace Triffid.Uav
                 document["projection"]["transform_json"] = player.ProjectionTransformPath;
                 AddProvenance(document);
                 UavProjectionSession.WriteAtomically(output, document);
+                LastExportPath=output;
                 Status = $"{session.Features.Count} feature(s), {session.Skipped.Count} skipped; " +
                     $"{session.SuccessfulRays}/{session.AttemptedRays} rays hit. Saved: {output}";
                 if (logSummary) Debug.Log($"[{GetType().Name}] {Status}", this);

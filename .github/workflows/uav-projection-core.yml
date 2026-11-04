@@ -3,13 +3,13 @@ on:
   push:
     paths:
       - 'projects/Drone/Assets/Custom Scripts/**'
-      - 'projects/Drone/Assets/Editor/UavProjectionChecks.cs'
+      - 'projects/Drone/Assets/Editor/*Checks.cs'
       - 'tests/**'
       - '.github/workflows/uav-projection-core.yml'
   pull_request:
     paths:
       - 'projects/Drone/Assets/Custom Scripts/**'
-      - 'projects/Drone/Assets/Editor/UavProjectionChecks.cs'
+      - 'projects/Drone/Assets/Editor/*Checks.cs'
       - 'tests/**'
       - '.github/workflows/uav-projection-core.yml'
   workflow_dispatch:
