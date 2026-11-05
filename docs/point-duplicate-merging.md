@@ -25,7 +25,7 @@ The merger never overwrites its input. The objects and report have a shared gene
 
 `PointProjector` takes distinct, deterministic foreground pixel samples distributed through each cropped mask. The bounding box limits the crop; sampled pixels must belong to foreground. Background bbox corners are not used as object footprint evidence. The anchor point, successful surface samples, exact mask RLE and original camera world-to-clip matrix are stored. The raw projection's ray counts now include these additional evidence rays; only anchors are added to its normal visual debug buffer.
 
-A map-derived inverse basis converts world points into a common metric ENU frame. It accounts for the map's rotation, scale and position-flip conventions without changing SRT playback. Its arbitrary origin is Unity world zero; relative distances are in metres. The matrix is stored with the export so the merger does not require live camera movement, a renderer, model inference or raycasting.
+A map-derived inverse basis converts world points into a common metric ENU frame. It accounts for the map's rotation, scale and position-flip conventions without changing SRT playback. Its arbitrary origin is Unity world zero; relative distances are in metres. The matrix is stored with the export so the merger does not require live camera movement, a renderer, model inference or raycasting. Projection cameras are frozen snapshots of the assigned SRT playback camera; captures briefly configure and restore that camera synchronously, before any job yields.
 
 Association proceeds as follows:
 

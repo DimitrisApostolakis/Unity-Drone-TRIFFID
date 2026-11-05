@@ -14,7 +14,7 @@ Open `projects/Drone` and the `Drone` scene. `DroneSimulation` now has three foc
 
 In `SrtDroneRaycastPlayer`, retain the existing SRT and transform JSON, Map Root, Drone View Camera, collider, lens, altitude and alignment settings. The existing trajectory position, timing, interpolation, loop and camera-preview behavior is retained. `Play Trajectory` pauses/resumes time advancement.
 
-The new projection APIs use an isolated, disabled camera. They do not move the live player or camera, change their lens, or seek/reset playback. Parsing and interpolation are in the `.Telemetry.cs` partial; projection calibration is in `.Projection.cs`; both belong to the same component and keep its existing serialized field names/GUID.
+Projection uses a frozen snapshot of the actual assigned SRT camera. Each capture synchronously saves the player/camera state, sets the source-image aspect, runs the same `ConfigurePose` path as playback at the exact SRT record, copies the camera and its exact projection/view matrices, then restores local transforms, full camera settings and playback state before returning or yielding. The temporary state is not rendered. There is no separate ENU-up orientation calculation. Every capture checks nine snapshot rays against the real camera and verifies restoration; a mismatch aborts export. Parsing and interpolation are in the `.Telemetry.cs` partial; projection calibration is in `.Projection.cs`; both belong to the same component and keep its existing serialized field names/GUID.
 
 Projectors work in Edit and Play Mode, on the Unity main thread. Collider loading/alignment must finish before pressing Project. The map must remain fixed during a projection job.
 
@@ -47,7 +47,7 @@ In `PolygonProjector`:
 
 The SRT must include latitude, longitude, relative/absolute altitude, gimbal yaw/pitch/roll and focal length. Capture selection is exact; the code does not guess a timestamp or assume nadir orientation. Image dimensions and filename are checked against the JSON. These checks cannot prove that two same-name/same-size images have identical content: always supply the original photo. A cropped, resized or reoriented photo requires matching recalibrated inputs.
 
-Projection uses the SRT lens and image aspect ratio; gimbal orientation defines image axes even near nadir. Lens and alignment settings come from the shared player. Absolute-altitude reference and map calibration still need to match the capture. No synthetic camera height or image rotation offset is applied.
+Projection snapshots the actual SRT playback camera using the photo aspect ratio. Image orientation, including near-nadir behavior, follows the player's existing camera convention. Lens and alignment settings come from the shared player. Absolute-altitude reference and map calibration still need to match the capture. No synthetic camera height or image rotation offset is applied.
 
 Binary masks use the perception's cropped **row-major RLE**, not COCO RLE. Only the current observation's crop is decoded. Pixel-edge tracing preserves concavity and holes; diagonal-only foreground islands become separate polygon members. Collinear boundary vertices are removed without changing the pixel footprint; long edges are sampled at the configured maximum spacing. Separate exteriors export as a `MultiPolygon`.
 
@@ -81,3 +81,11 @@ NEWTONSOFT_DLL=/path/to/Newtonsoft.Json.dll tests/run-core-checks.sh
 ```
 
 The small vector shim is outside `Assets` and is used only by the standalone checks. These core checks do not validate Unity's camera optics, physics, inspector rendering or your actual scene alignment. Before relying on geographic output, inspect both routes against known scene locations in Unity, test cancellation, and confirm the simulated trajectory continues unchanged while projection runs.
+
+## SRT camera parity check
+
+After a camera-snapshot update, rerun **PointProjector → Project & Export**, then **PointDuplicateMerger → Merge & Export**. Existing detection masks/supports do not need new model inference. Old exports retain the old matrices and cannot demonstrate the fix. New exports record `projection.camera_configuration = srt_player_camera_snapshot_v1`.
+
+Use **Check Projection Camera Parity** in the SRT player inspector (also available from its component context menu). This checks up to eight loaded SRT records, two image aspects (3840×2160 and square), and nine pixel rays per capture. It verifies camera state and playback restoration and does not require model inference or map ray hits. The live Game View aspect is restored after testing. This is a Unity runtime check and is not executed by the standalone C# core runner.
+
+This change preserves the configured input paths, flips, map transforms, lens choices and trajectory code; no scene asset changes are required. Camera parity addresses the previously separate projection-camera orientation. It does not establish that the collider matches the Gaussian rendering or that georeferencing is accurate.

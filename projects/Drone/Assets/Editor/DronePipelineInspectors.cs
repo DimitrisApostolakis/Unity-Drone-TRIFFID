@@ -71,6 +71,7 @@ public sealed class SrtDroneRaycastPlayerEditor : Editor
             var player = (SrtDroneRaycastPlayer)target;
             DronePipelineInspectorGui.DrawActionButtons(
                 ("Validate Setup", player.ValidateSetup), ("Reload Inputs", player.ReloadInputs));
+            if (GUILayout.Button("Check Projection Camera Parity")) player.ValidateProjectionCameraParity();
         }
     }
 }

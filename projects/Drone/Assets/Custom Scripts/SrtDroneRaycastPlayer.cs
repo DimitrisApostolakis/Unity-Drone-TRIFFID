@@ -422,10 +422,9 @@ public sealed partial class SrtDroneRaycastPlayer : MonoBehaviour
             rotation[2] * enuDirection.x + rotation[5] * enuDirection.y + rotation[8] * enuDirection.z);
     }
 
-    private void UpdateDroneViewCamera(Vector3 rayOrigin, Vector3 rayDirection, SrtFrame frame,
-        Camera destination = null, float captureAspect = 0f)
+    private void UpdateDroneViewCamera(Vector3 rayOrigin, Vector3 rayDirection, SrtFrame frame)
     {
-        Camera camera = destination != null ? destination : droneViewCamera;
+        Camera camera = droneViewCamera;
         if (camera == null)
             return;
 
@@ -434,24 +433,10 @@ public sealed partial class SrtDroneRaycastPlayer : MonoBehaviour
         if (Mathf.Abs(Vector3.Dot(forward, up)) > 0.95f)
             up = transform.right;
 
-        if (destination != null)
-        {
-            Vector3 enuRight = BuildEnuRotation(frame.yaw, frame.pitch, frame.roll) * EnuEast;
-            Vector3 colmapRight = EnuToColmapDirection(enuRight);
-            if (flipDirectionX) colmapRight.x = -colmapRight.x;
-            if (flipDirectionY) colmapRight.y = -colmapRight.y;
-            Vector3 right = mapRoot != null ? mapRoot.TransformDirection(colmapRight) : colmapRight;
-            up = Vector3.Cross(forward, right).normalized;
-            if (up.sqrMagnitude < 0.0001f)
-                throw new InvalidOperationException("Degenerate camera axes; check map alignment.");
-            camera.orthographic = false;
-            camera.lensShift = Vector2.zero;
-            camera.ResetProjectionMatrix();
-        }
         camera.transform.position = rayOrigin;
         camera.transform.rotation = Quaternion.LookRotation(forward, up);
 
-        float sourceAspect = captureAspect > 0f ? captureAspect : GetCaptureAspectRatio();
+        float sourceAspect = GetCaptureAspectRatio();
         bool hasValidFocalLength = frame.focalLengthMm > 0.0001f && IsFinite(frame.focalLengthMm);
         bool hasValidSensorHeight = sensorHeightMm > 0.0001f && IsFinite(sensorHeightMm);
         bool hasValidPhysicalLens = estimateFovFromFocalLength && hasValidFocalLength &&

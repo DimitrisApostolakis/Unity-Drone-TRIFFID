@@ -117,6 +117,7 @@ namespace Triffid.Uav
                 // Cancellation or a fatal input error never overwrites the previous export.
                 JObject document = session.Document(doc.FilePath, TaskName);
                 document["projection"]["transform_json"] = player.ProjectionTransformPath;
+                document["projection"]["camera_configuration"] = "srt_player_camera_snapshot_v1";
                 AddProvenance(document);
                 UavProjectionSession.WriteAtomically(output, document);
                 LastExportPath=output;
