@@ -1,0 +1,32 @@
+name: UAV projection core
+on:
+  push:
+    paths:
+      - 'projects/Drone/Assets/Custom Scripts/**'
+      - 'projects/Drone/Assets/Editor/*Checks.cs'
+      - 'tests/**'
+      - '.github/workflows/uav-projection-core.yml'
+  pull_request:
+    paths:
+      - 'projects/Drone/Assets/Custom Scripts/**'
+      - 'projects/Drone/Assets/Editor/*Checks.cs'
+      - 'tests/**'
+      - '.github/workflows/uav-projection-core.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the actual C# core checks with the installed SDK
+        shell: bash
+        run: |
+          sdk_version="$(dotnet --version)"
+          sdk_root="$(dirname "$(readlink -f "$(command -v dotnet)")")/sdk/$sdk_version"
+          framework="net${sdk_version%%.*}.0"
+          printf '%s' '<configuration><packageSources><clear /></packageSources></configuration>' > /tmp/uav-nuget.config
+          dotnet restore tests/UavCoreChecks.csproj --configfile /tmp/uav-nuget.config -p:CoreTargetFramework="$framework" -p:NewtonsoftPath="$sdk_root/Newtonsoft.Json.dll"
+          dotnet run --project tests/UavCoreChecks.csproj --no-restore -p:CoreTargetFramework="$framework" -p:NewtonsoftPath="$sdk_root/Newtonsoft.Json.dll"

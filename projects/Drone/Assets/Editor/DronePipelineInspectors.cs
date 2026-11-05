@@ -50,46 +50,28 @@ public sealed class SrtDroneRaycastPlayerEditor : Editor
     public override void OnInspectorGUI()
     {
         serializedObject.Update();
-        EditorGUILayout.LabelField("Input Path Loading", EditorStyles.boldLabel);
-        SerializedProperty useShared = serializedObject.FindProperty("useSharedInputPathsJson");
-        EditorGUILayout.PropertyField(useShared, new GUIContent("Use Shared Path JSON"));
-        EditorGUI.indentLevel++;
-        if (useShared.boolValue)
-        {
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("sharedInputPathsJsonFile"), new GUIContent("Shared Config File"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("srtPathJsonKey"), new GUIContent("SRT Path JSON Key"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("transformPathJsonKey"), new GUIContent("Transform Path JSON Key"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("inputPathRoot"), new GUIContent("Input Path Root"));
-            EditorGUILayout.HelpBox(
-                "The shared config is read from StreamingAssets; both path values use Input Path Root.",
-                MessageType.None);
-        }
-        else
-        {
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("srtFilePath"), new GUIContent("Custom SRT Path"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("transformConfigFilePath"), new GUIContent("Custom Transform Path"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("inputPathRoot"), new GUIContent("Input Path Root"));
-        }
-        EditorGUI.indentLevel--;
-
-        DrawPropertiesExcluding(
-            serializedObject,
-            "m_Script",
-            "srtFilePath",
-            "transformConfigFilePath",
-            "inputPathRoot",
-            "useSharedInputPathsJson",
-            "sharedInputPathsJsonFile",
-            "srtPathJsonKey",
-            "transformPathJsonKey");
+        EditorGUILayout.HelpBox("Trajectory simulation and shared camera/map calibration. PointProjector and PolygonProjector handle perception results.", MessageType.Info);
+        bool shared = serializedObject.FindProperty("useSharedInputPathsJson").boolValue;
+        DroneInspectorSections.Draw(serializedObject, "Input Paths", true,
+            shared ? new[] { "useSharedInputPathsJson", "sharedInputPathsJsonFile", "srtPathJsonKey", "transformPathJsonKey", "inputPathRoot" }
+                : new[] { "useSharedInputPathsJson", "srtFilePath", "transformConfigFilePath", "inputPathRoot" });
+        DroneInspectorSections.Draw(serializedObject, "Scene & Raycast Target", true,
+            "mapRoot", "droneViewCamera", "targetCollider", "raycastTargetOnly", "raycastMask", "raycastDistance");
+        DroneInspectorSections.Draw(serializedObject, "Trajectory Playback", true,
+            "playTrajectory", "playbackSpeed", "loopPlayback", "interpolateFrames", "showInGameView");
+        DroneInspectorSections.Draw(serializedObject, "Lens Calibration", false,
+            "estimateFovFromFocalLength", "srtFocalLengthIs35mmEquivalent", "sensorHeightMm", "fixedVerticalFovDegrees");
+        DroneInspectorSections.Draw(serializedObject, "Pose & Alignment", false,
+            "useAbsAltitude", "flipPositionX", "flipPositionY", "flipDirectionX", "flipDirectionY",
+            "yawOffsetDegrees", "gimbalBaseRotationEuler", "flipYaw", "flipPitch", "flipRoll");
+        DroneInspectorSections.Draw(serializedObject, "Debug", false, "drawDebug");
         serializedObject.ApplyModifiedProperties();
-
         if (targets.Length == 1)
         {
             var player = (SrtDroneRaycastPlayer)target;
             DronePipelineInspectorGui.DrawActionButtons(
-                ("Validate Setup", player.ValidateSetup),
-                ("Reload Inputs", player.ReloadInputs));
+                ("Validate Setup", player.ValidateSetup), ("Reload Inputs", player.ReloadInputs));
+            if (GUILayout.Button("Check Projection Camera Parity")) player.ValidateProjectionCameraParity();
         }
     }
 }
@@ -177,3 +159,4 @@ public sealed class MapColliderSyncEditor : Editor
             ((MapColliderSync)target).SyncToMap();
     }
 }
+

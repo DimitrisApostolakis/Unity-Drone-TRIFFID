@@ -1,3 +1,7 @@
+# TRIFFID UAV projection
+
+See [UAV setup, point/polygon projection and inspector debugging](docs/uav-projection.md) for the drone workflow.
+
 # Gaussian Splatting playground in Unity
 
 SIGGRAPH 2023 had a paper "[**3D Gaussian Splatting for Real-Time Radiance Field Rendering**](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)" by Kerbl, Kopanas, Leimkühler, Drettakis
@@ -102,3 +106,4 @@ However, keep in mind that the [license of the original paper implementation](ht
 says that the official _training_ software for the Gaussian Splats is for educational / academic / non-commercial
 purpose; commercial usage requires getting license from INRIA. That is: even if this viewer / integration
 into Unity is just "MIT license", you need to separately consider *how* did you get your Gaussian Splat PLY files.
+
