@@ -12,7 +12,6 @@ public static class UavProjectionChecks
     [MenuItem("TRIFFID/UAV/Run Projection Core Checks")]
     public static void RunCore()
     {
-        PointMergeChecks.RunAll();
         int checkedMasks = 0;
         // Exhaustive 3x3 topology, including donuts, diagonal contacts and concavities.
         for (int bits = 1; bits < 512; bits++)

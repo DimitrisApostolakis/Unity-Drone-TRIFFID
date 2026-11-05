@@ -13,7 +13,5 @@
     <Compile Include="../projects/Drone/Assets/Custom Scripts/UavProjection/UavMaskContours.cs" />
     <Compile Include="../projects/Drone/Assets/Custom Scripts/UavProjection/UavGeoJsonRing.cs" />
     <Compile Include="../projects/Drone/Assets/Editor/UavProjectionChecks.cs" />
-    <Compile Include="../projects/Drone/Assets/Editor/PointMergeChecks.cs" />
-    <Compile Include="../projects/Drone/Assets/Custom Scripts/UavProjection/Merging/*.cs" />
   </ItemGroup>
 </Project>

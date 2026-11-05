@@ -57,6 +57,8 @@ Every contour sample, including holes, must hit the collider. If a sample misses
 
 Each projector groups Inputs, Output, Debug and Performance; the polygon inspector also groups Photo Capture and Polygon Sampling. Advanced sections start collapsed. Settings are locked while a job runs.
 
+The read-only **Camera (from SRT Player)** field shows the shared camera used by both projectors. Assign it on `SrtDroneRaycastPlayer` under **Drone View Camera**; projection requires that camera and has no independent lens or pose settings.
+
 - **Validate Inputs:** check paths, schema, capture pose, dimensions and RLE without exporting.
 - **Project & Export:** process with the configured ray budget per frame/editor update.
 - **Cancel:** release the temporary camera and preserve the previous output file.
@@ -66,7 +68,9 @@ Select the projector's GameObject and enable Scene Gizmos. Cyan markers indicate
 
 Both outputs are GeoJSON FeatureCollections in `[longitude, latitude, altitude]` order. Features preserve class/source/observation IDs and mask-derived image metadata; surface-hit records include world position, normal, distance, collider and triangle index. Point and polygon files are independent. `projection.skipped_observations` lists failures.
 
-**The point export remains raw observations.** A vehicle seen from several views remains several raw point features. The optional [PointDuplicateMerger](point-duplicate-merging.md) groups static cross-view observations into a separate object export, with sampled mask evidence and a report. Polygon fusion and moving-object tracking are separate work.
+**The point export contains raw observations with no duplicate filtering or cross-view merging.** Each observation whose foreground ray hits the map exports one feature, even when several views see the same object. Point projection casts one ray per observation; duplicate-matching samples, grids and thresholds are removed. Unity no longer produces `uav_objects.geojson` or `dedup_report.json`. Existing files from older runs are not updated or deleted; use the newly exported `uav_points.geojson`.
+
+If you previously added the duplicate-merger component to your local scene or prefab, remove that component (it may appear as **Missing (Mono Script)** after updating). The checked-in scene never included it. The PointProjector inspector now contains only projection inputs, output, debug and performance settings.
 
 Completed output is written by atomic replacement. Invalid input or cancellation leaves the previous file intact. Projection raycasts reuse a growing non-allocating hit buffer; a full buffer is retried so target filtering cannot silently discard nearer hits.
 
@@ -84,7 +88,7 @@ The small vector shim is outside `Assets` and is used only by the standalone che
 
 ## SRT camera parity check
 
-After a camera-snapshot update, rerun **PointProjector → Project & Export**, then **PointDuplicateMerger → Merge & Export**. Existing detection masks/supports do not need new model inference. Old exports retain the old matrices and cannot demonstrate the fix. New exports record `projection.camera_configuration = srt_player_camera_snapshot_v1`.
+After a camera-snapshot update, rerun **PointProjector → Project & Export** and inspect `uav_points.geojson`. Existing detection masks/supports do not need new model inference. Old exports retain the previous projection results and cannot demonstrate the fix. New exports record `projection.camera_configuration = srt_player_camera_snapshot_v1`.
 
 Use **Check Projection Camera Parity** in the SRT player inspector (also available from its component context menu). This checks up to eight loaded SRT records, two image aspects (3840×2160 and square), and nine pixel rays per capture. It verifies camera state and playback restoration and does not require model inference or map ray hits. The live Game View aspect is restored after testing. This is a Unity runtime check and is not executed by the standalone C# core runner.
 

@@ -127,21 +127,6 @@ namespace Triffid.Uav
             return new UavBinaryMask(w, h, x, y, pixels);
         }
 
-        // Evenly sample foreground ranks across the whole crop, never bbox background.
-        public IEnumerable<Vector2> ForegroundSamples(int requested)
-        {
-            int count=0;
-            foreach(bool pixel in foreground) if(pixel) count++;
-            int total=Math.Min(requested,count), rank=0, target=0;
-            for(int i=0;i<foreground.Length && target<total;i++)
-            {
-                if(!foreground[i]) continue;
-                if(rank==(int)Math.Floor((target+0.5)*count/total))
-                { yield return new Vector2(X+i%Width+0.5f,Y+i/Width+0.5f); target++; }
-                rank++;
-            }
-        }
-
         public Vector2 PointSample(JObject observation)
         {
             var point = observation["raycast_point_xy"] as JArray;

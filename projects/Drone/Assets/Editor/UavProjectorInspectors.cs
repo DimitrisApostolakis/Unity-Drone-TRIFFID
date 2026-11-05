@@ -36,6 +36,11 @@ public sealed class UavProjectorInspector : Editor
         using (new EditorGUI.DisabledScope(projector.IsRunning))
         {
             DroneInspectorSections.Draw(serializedObject, "Inputs", true, "player", "observationsJsonPath", "inputPathRoot");
+            var player = serializedObject.FindProperty("player").objectReferenceValue as SrtDroneRaycastPlayer;
+            using (new EditorGUI.DisabledScope(true))
+                EditorGUILayout.ObjectField(new GUIContent("Camera (from SRT Player)",
+                    "Both projectors use this camera's pose and lens at the matching SRT capture."),
+                    player != null ? player.DroneViewCamera : null, typeof(Camera), true);
             if (polygons)
             {
                 DroneInspectorSections.Draw(serializedObject, "Photo Capture", true,
@@ -43,8 +48,6 @@ public sealed class UavProjectorInspector : Editor
                 DroneInspectorSections.Draw(serializedObject, "Polygon Sampling", false,
                     "maximumSampleSpacingPixels", "maximumVerticesPerObservation");
             }
-            if(!polygons) DroneInspectorSections.Draw(serializedObject, "Duplicate Matching Evidence", false,
-                "collectMergeEvidence", "foregroundSamplesPerObservation");
             DroneInspectorSections.Draw(serializedObject, "Output", true, "outputGeoJsonPath", "outputPathRoot");
             DroneInspectorSections.Draw(serializedObject, "Debug", false,
                 "showDebug", "showRays", "showLabels", "maximumDebugSamples", "markerSize", "logSummary");
@@ -61,15 +64,6 @@ public sealed class UavProjectorInspector : Editor
             using (new EditorGUI.DisabledScope(!projector.IsRunning))
                 if (GUILayout.Button("Cancel")) projector.CancelProjection();
             if (GUILayout.Button("Clear Debug")) { projector.ClearDebug(); SceneView.RepaintAll(); }
-        }
-        using(new EditorGUI.DisabledScope(projector.IsRunning))
-        if(!polygons && GUILayout.Button("Add / Select Duplicate Merger"))
-        {
-            var merger=projector.GetComponent<PointDuplicateMerger>();
-            if(merger==null) merger=Undo.AddComponent<PointDuplicateMerger>(projector.gameObject);
-            if(!string.IsNullOrWhiteSpace(projector.LastExportPath))
-            { Undo.RecordObject(merger,"Set projection input");merger.SetInput(projector.LastExportPath);EditorUtility.SetDirty(merger); }
-            Selection.activeGameObject=merger.gameObject;
         }
         EditorGUILayout.HelpBox(projector.Status, MessageType.None);
         EditorGUILayout.LabelField("Select this component's object and enable Scene Gizmos for debugging.", EditorStyles.wordWrappedMiniLabel);

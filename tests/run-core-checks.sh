@@ -10,7 +10,5 @@ mcs -langversion:latest -r:"$NEWTONSOFT_DLL" -out:"$task_check_dir/checks.exe" \
   'projects/Drone/Assets/Custom Scripts/UavProjection/UavObservationDocument.cs' \
   'projects/Drone/Assets/Custom Scripts/UavProjection/UavMaskContours.cs' \
   'projects/Drone/Assets/Custom Scripts/UavProjection/UavGeoJsonRing.cs' \
-  'projects/Drone/Assets/Custom Scripts/UavProjection/Merging/'*.cs \
-  projects/Drone/Assets/Editor/PointMergeChecks.cs \
   projects/Drone/Assets/Editor/UavProjectionChecks.cs
 mono "$task_check_dir/checks.exe"
